@@ -7,10 +7,9 @@ from pyzbar.pyzbar import decode
 import datetime
 from fpdf import FPDF
 import hashlib
-import os
 
 # Connect to SQLite database (creates if not exists)
-conn = sqlite3.connect('stationary.db', check_same_thread=False)  # Allow multi-thread for Streamlit
+conn = sqlite3.connect('stationary.db', check_same_thread=False)
 cur = conn.cursor()
 
 # Create tables if they don't exist
@@ -37,7 +36,7 @@ cur.execute('''
         item_id INTEGER NOT NULL,
         trans_date DATE NOT NULL,
         quantity INTEGER NOT NULL,
-        trans_type TEXT NOT NULL,  -- 'add' or 'remove'
+        trans_type TEXT NOT NULL,
         user TEXT NOT NULL
     )
 ''')
@@ -55,13 +54,23 @@ def add_user(username, password):
         conn.commit()
         return True
     except sqlite3.IntegrityError:
-        return False  # Username exists
+        return False
 
 # Function to verify user
 def verify_user(username, password):
     password_hash = hash_password(password)
     cur.execute("SELECT * FROM users WHERE username = ? AND password_hash = ?", (username, password_hash))
     return cur.fetchone() is not None
+
+# Function to generate QR code for an item
+def generate_qr(item_id):
+    qr = qrcode.QRCode(version=1, box_size=10, border=5)
+    qr.add_data(str(item_id))
+    qr.make(fit=True)
+    img = qr.make_image(fill='black', back_color='white')
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 # Function to add a new item and generate QR
 def add_item(name, shelf, row, price, initial_stock, low_stock_threshold):
@@ -71,19 +80,8 @@ def add_item(name, shelf, row, price, initial_stock, low_stock_threshold):
     )
     conn.commit()
     item_id = cur.lastrowid
-    
-    # Generate QR code with item ID
-    qr = qrcode.QRCode(version=1, box_size=10, border=5)
-    qr.add_data(str(item_id))
-    qr.make(fit=True)
-    img = qr.make_image(fill='black', back_color='white')
-    
-    # Convert to bytes for display/download
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    byte_im = buf.getvalue()
-    
-    return item_id, byte_im
+    qr_bytes = generate_qr(item_id)
+    return item_id, qr_bytes
 
 # Function to update stock and log transaction
 def update_stock(item_id, quantity, user):
@@ -95,7 +93,7 @@ def update_stock(item_id, quantity, user):
     )
     conn.commit()
 
-# Function to get monthly usage (total quantity removed in a month/year)
+# Function to get monthly usage
 def get_monthly_usage(month, year):
     cur.execute("""
         SELECT SUM(quantity) FROM transactions 
@@ -106,7 +104,7 @@ def get_monthly_usage(month, year):
     usage = cur.fetchone()[0] or 0
     return usage
 
-# Function to get current stock value (sum of stock * price for all items)
+# Function to get current stock value
 def get_current_stock_value():
     cur.execute("SELECT SUM(stock * price) FROM items")
     value = cur.fetchone()[0] or 0
@@ -122,12 +120,10 @@ def generate_pdf_report(month, year, usage, value, low_stock_items):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=12)
-    
     pdf.cell(200, 10, txt="Stationary Management Report", ln=1, align='C')
     pdf.cell(200, 10, txt=f"Month: {month}/{year}", ln=1)
     pdf.cell(200, 10, txt=f"Monthly Usage (Quantity Removed): {usage}", ln=1)
     pdf.cell(200, 10, txt=f"Current Stock Value: ${value:.2f}", ln=1)
-    
     pdf.ln(10)
     pdf.cell(200, 10, txt="Reorder Reminders (Low Stock Items):", ln=1)
     if low_stock_items:
@@ -135,6 +131,27 @@ def generate_pdf_report(month, year, usage, value, low_stock_items):
             pdf.cell(200, 10, txt=f"ID: {item[0]}, Name: {item[1]}, Stock: {item[2]} (Threshold: {item[3]})", ln=1)
     else:
         pdf.cell(200, 10, txt="No low stock items.", ln=1)
+    buf = BytesIO()
+    pdf.output(buf)
+    return buf.getvalue()
+
+# Function to generate PDF with all QR codes
+def generate_qr_pdf():
+    pdf = FPDF()
+    pdf.set_font("Arial", size=12)
+    cur.execute("SELECT id, name FROM items")
+    items = cur.fetchall()
+    
+    for item in items:
+        item_id, name = item
+        pdf.add_page()
+        pdf.cell(200, 10, txt=f"Item ID: {item_id}, Name: {name}", ln=1, align='C')
+        qr_bytes = generate_qr(item_id)
+        with open(f"temp_qr_{item_id}.png", "wb") as f:
+            f.write(qr_bytes)
+        pdf.image(f"temp_qr_{item_id}.png", x=50, y=30, w=100)
+        import os
+        os.remove(f"temp_qr_{item_id}.png")  # Clean up temp file
     
     buf = BytesIO()
     pdf.output(buf)
@@ -178,7 +195,7 @@ else:
         st.session_state.user = None
         st.rerun()
 
-    menu = st.sidebar.selectbox("Menu", ["Add New Item", "Add Stock", "Remove Stock", "Generate Report", "Reorder Reminders"])
+    menu = st.sidebar.selectbox("Menu", ["Add New Item", "Add Stock", "Remove Stock", "Generate Report", "Reorder Reminders", "QR Code List"])
 
     if menu == "Add New Item":
         st.header("Add New Item")
@@ -193,11 +210,12 @@ else:
             if name:
                 item_id, qr_bytes = add_item(name, shelf, row, price, initial_stock, low_stock_threshold)
                 st.success(f"Item added with ID: {item_id}")
-                st.image(qr_bytes, caption="QR Code for Item", use_column_width=True)
+                st.write(f"Name: {name}, Shelf: {shelf}, Row: {row}, Price: ${price:.2f}, Stock: {initial_stock}, Threshold: {low_stock_threshold}")
+                st.image(qr_bytes, caption=f"QR Code for Item ID {item_id}", use_column_width=True)
                 st.download_button(
                     label="Download QR Code",
                     data=qr_bytes,
-                    file_name=f"qr_{item_id}.png",
+                    file_name=f"qr_{item_id}_{name}.png",
                     mime="image/png"
                 )
             else:
@@ -216,7 +234,6 @@ else:
                 item_id = int(decoded_objects[0].data.decode('utf-8'))
                 st.success(f"Scanned Item ID: {item_id}")
                 
-                # Fetch current stock for display
                 cur.execute("SELECT name, stock FROM items WHERE id = ?", (item_id,))
                 item = cur.fetchone()
                 if item:
@@ -260,3 +277,35 @@ else:
                 st.warning(f"ID: {item[0]}, Name: {item[1]}, Stock: {item[2]} (Threshold: {item[3]}) - Reorder now!")
         else:
             st.success("No low stock items.")
+
+    elif menu == "QR Code List":
+        st.header("QR Code List")
+        cur.execute("SELECT id, name, shelf, row, stock FROM items")
+        items = cur.fetchall()
+        
+        if items:
+            st.write("List of all items with QR codes:")
+            for item in items:
+                item_id, name, shelf, row, stock = item
+                st.write(f"ID: {item_id}, Name: {name}, Shelf: {shelf}, Row: {row}, Stock: {stock}")
+                qr_bytes = generate_qr(item_id)
+                st.image(qr_bytes, caption=f"QR Code for {name} (ID: {item_id})", width=200)
+                st.download_button(
+                    label=f"Download QR for {name}",
+                    data=qr_bytes,
+                    file_name=f"qr_{item_id}_{name}.png",
+                    mime="image/png"
+                )
+                st.markdown("---")
+            
+            # Option to download all QR codes as a PDF
+            if st.button("Download All QR Codes as PDF"):
+                pdf_bytes = generate_qr_pdf()
+                st.download_button(
+                    label="Download QR Code PDF",
+                    data=pdf_bytes,
+                    file_name="all_qr_codes.pdf",
+                    mime="application/pdf"
+                )
+        else:
+            st.info("No items found in the database.")
