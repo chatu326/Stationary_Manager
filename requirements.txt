@@ -1,0 +1,5 @@
+streamlit
+qrcode
+pillow
+pyzbar
+fpdf
