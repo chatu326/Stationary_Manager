@@ -131,6 +131,8 @@ def generate_pdf_report(month, year, usage, value, low_stock_items):
             pdf.cell(200, 10, txt=f"ID: {item[0]}, Name: {item[1]}, Stock: {item[2]} (Threshold: {item[3]})", ln=1)
     else:
         pdf.cell(200, 10, txt="No low stock items.", ln=1)
+    pdf.ln(10)
+    pdf.cell(200, 10, txt="Created by BOC Weerambugedara Team", ln=1, align='C')
     buf = BytesIO()
     pdf.output(buf)
     return buf.getvalue()
@@ -150,8 +152,9 @@ def generate_qr_pdf():
         with open(f"temp_qr_{item_id}.png", "wb") as f:
             f.write(qr_bytes)
         pdf.image(f"temp_qr_{item_id}.png", x=50, y=30, w=100)
+        pdf.cell(200, 10, txt="Created by BOC Weerambugedara Team", ln=1, align='C')
         import os
-        os.remove(f"temp_qr_{item_id}.png")  # Clean up temp file
+        os.remove(f"temp_qr_{item_id}.png")
     
     buf = BytesIO()
     pdf.output(buf)
@@ -159,6 +162,16 @@ def generate_qr_pdf():
 
 # Streamlit App Layout
 st.title("Stationary Management System")
+
+# Add branding to sidebar
+st.sidebar.markdown(
+    """
+    <div style="text-align: center; font-weight: bold; color: #4CAF50; margin-top: 20px;">
+        Created by BOC Weerambugedara Team
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 
 # Session state for login
 if 'logged_in' not in st.session_state:
@@ -298,7 +311,6 @@ else:
                 )
                 st.markdown("---")
             
-            # Option to download all QR codes as a PDF
             if st.button("Download All QR Codes as PDF"):
                 pdf_bytes = generate_qr_pdf()
                 st.download_button(
