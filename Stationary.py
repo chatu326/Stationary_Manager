@@ -60,6 +60,7 @@ def sync_db_from_github():
         cur.execute('''
             CREATE TABLE IF NOT EXISTS items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                form_number TEXT UNIQUE,
                 name TEXT NOT NULL,
                 shelf INTEGER NOT NULL,
                 row INTEGER NOT NULL,
@@ -78,7 +79,12 @@ def sync_db_from_github():
                 user TEXT NOT NULL
             )
         ''')
-        conn.commit()
+        # Add form_number column to existing items table if it doesn't exist
+        try:
+            cur.execute("ALTER TABLE items ADD COLUMN form_number TEXT UNIQUE")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         conn.close()
 
 # Commit and push database to GitHub
@@ -152,16 +158,20 @@ def generate_qr(item_id):
     return buf.getvalue()
 
 # Function to add a new item and generate QR
-def add_item(name, shelf, row, price, initial_stock, low_stock_threshold):
-    cur.execute(
-        "INSERT INTO items (name, shelf, row, price, stock, low_stock_threshold) VALUES (?, ?, ?, ?, ?, ?)",
-        (name, shelf, row, price, initial_stock, low_stock_threshold)
-    )
-    conn.commit()
-    sync_db_to_github()  # Sync database to GitHub
-    item_id = cur.lastrowid
-    qr_bytes = generate_qr(item_id)
-    return item_id, qr_bytes
+def add_item(form_number, name, shelf, row, price, initial_stock, low_stock_threshold):
+    try:
+        cur.execute(
+            "INSERT INTO items (form_number, name, shelf, row, price, stock, low_stock_threshold) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (form_number, name, shelf, row, price, initial_stock, low_stock_threshold)
+        )
+        conn.commit()
+        sync_db_to_github()  # Sync database to GitHub
+        item_id = cur.lastrowid
+        qr_bytes = generate_qr(item_id)
+        return item_id, qr_bytes
+    except sqlite3.IntegrityError:
+        st.error("Item/Form number already exists. Please use a unique number.")
+        return None, None
 
 # Function to update stock and log transaction
 def update_stock(item_id, quantity, user):
@@ -196,8 +206,13 @@ def get_low_stock_items():
     cur.execute("SELECT id, name, stock, low_stock_threshold FROM items WHERE stock < low_stock_threshold")
     return cur.fetchall()
 
-# Function to generate PDF report
-def generate_pdf_report(month, year, usage, value, low_stock_items):
+# Function to get all items for report
+def get_all_items():
+    cur.execute("SELECT id, form_number, name, shelf, row, price, stock, low_stock_threshold FROM items")
+    return cur.fetchall()
+
+# Function to generate monthly usage report
+def generate_monthly_report(month, year, usage, value, low_stock_items):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=12)
@@ -215,25 +230,50 @@ def generate_pdf_report(month, year, usage, value, low_stock_items):
     pdf.ln(10)
     pdf.cell(200, 10, txt="Created by BOC Weerambugedara Team", ln=1, align='C')
     
-    # Write PDF to a temporary file
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
         pdf.output(tmp_file.name)
         tmp_file.seek(0)
         pdf_bytes = tmp_file.read()
-    os.unlink(tmp_file.name)  # Clean up temporary file
+    os.unlink(tmp_file.name)
+    return pdf_bytes
+
+# Function to generate all items report
+def generate_all_items_report(items):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    pdf.cell(200, 10, txt="All Items Report", ln=1, align='C')
+    pdf.cell(200, 10, txt=f"Generated on: {datetime.date.today()}", ln=1)
+    pdf.ln(10)
+    pdf.cell(200, 10, txt="Items List:", ln=1)
+    if items:
+        for item in items:
+            form_number = item[1] if item[1] else "N/A"  # Handle NULL form_number for existing items
+            pdf.cell(200, 10, txt=f"ID: {item[0]}, Form Number: {form_number}, Name: {item[2]}, Shelf: {item[3]}, Row: {item[4]}, Price: ${item[5]:.2f}, Stock: {item[6]}, Threshold: {item[7]}", ln=1)
+    else:
+        pdf.cell(200, 10, txt="No items found.", ln=1)
+    pdf.ln(10)
+    pdf.cell(200, 10, txt="Created by BOC Weerambugedara Team", ln=1, align='C')
+    
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+        pdf.output(tmp_file.name)
+        tmp_file.seek(0)
+        pdf_bytes = tmp_file.read()
+    os.unlink(tmp_file.name)
     return pdf_bytes
 
 # Function to generate PDF with all QR codes
 def generate_qr_pdf():
     pdf = FPDF()
     pdf.set_font("Arial", size=12)
-    cur.execute("SELECT id, name FROM items")
+    cur.execute("SELECT id, form_number, name FROM items")
     items = cur.fetchall()
     
     for item in items:
-        item_id, name = item
+        item_id, form_number, name = item
+        form_number = form_number if form_number else "N/A"
         pdf.add_page()
-        pdf.cell(200, 10, txt=f"Item ID: {item_id}, Name: {name}", ln=1, align='C')
+        pdf.cell(200, 10, txt=f"Item ID: {item_id}, Form Number: {form_number}, Name: {name}", ln=1, align='C')
         qr_bytes = generate_qr(item_id)
         with open(f"temp_qr_{item_id}.png", "wb") as f:
             f.write(qr_bytes)
@@ -241,12 +281,11 @@ def generate_qr_pdf():
         pdf.cell(200, 10, txt="Created by BOC Weerambugedara Team", ln=1, align='C')
         os.remove(f"temp_qr_{item_id}.png")
     
-    # Write PDF to a temporary file
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
         pdf.output(tmp_file.name)
         tmp_file.seek(0)
         pdf_bytes = tmp_file.read()
-    os.unlink(tmp_file.name)  # Clean up temporary file
+    os.unlink(tmp_file.name)
     return pdf_bytes
 
 # Streamlit App Layout
@@ -301,6 +340,7 @@ else:
 
     if menu == "Add New Item":
         st.header("Add New Item")
+        form_number = st.text_input("Item/Form Number (must be unique)")
         name = st.text_input("Item Name")
         shelf = st.number_input("Shelf Number", min_value=1, step=1)
         row = st.number_input("Row Number", min_value=1, step=1)
@@ -309,19 +349,20 @@ else:
         low_stock_threshold = st.number_input("Low Stock Threshold", min_value=1, step=1, value=10)
         
         if st.button("Add Item"):
-            if name:
-                item_id, qr_bytes = add_item(name, shelf, row, price, initial_stock, low_stock_threshold)
-                st.success(f"Item added with ID: {item_id}")
-                st.write(f"Name: {name}, Shelf: {shelf}, Row: {row}, Price: ${price:.2f}, Stock: {initial_stock}, Threshold: {low_stock_threshold}")
-                st.image(qr_bytes, caption=f"QR Code for Item ID {item_id}", use_column_width=True)
-                st.download_button(
-                    label="Download QR Code",
-                    data=qr_bytes,
-                    file_name=f"qr_{item_id}_{name}.png",
-                    mime="image/png"
-                )
+            if form_number and name:
+                item_id, qr_bytes = add_item(form_number, name, shelf, row, price, initial_stock, low_stock_threshold)
+                if item_id:
+                    st.success(f"Item added with ID: {item_id}")
+                    st.write(f"Form Number: {form_number}, Name: {name}, Shelf: {shelf}, Row: {row}, Price: ${price:.2f}, Stock: {initial_stock}, Threshold: {low_stock_threshold}")
+                    st.image(qr_bytes, caption=f"QR Code for Item ID {item_id}", use_column_width=True)
+                    st.download_button(
+                        label="Download QR Code",
+                        data=qr_bytes,
+                        file_name=f"qr_{item_id}_{form_number}_{name}.png",
+                        mime="image/png"
+                    )
             else:
-                st.error("Please enter an item name.")
+                st.error("Please enter both an item/form number and item name.")
 
     elif menu == "Add Stock" or menu == "Remove Stock":
         action = "Add" if menu == "Add Stock" else "Remove"
@@ -336,10 +377,11 @@ else:
                 item_id = int(decoded_objects[0].data.decode('utf-8'))
                 st.success(f"Scanned Item ID: {item_id}")
                 
-                cur.execute("SELECT name, stock FROM items WHERE id = ?", (item_id,))
+                cur.execute("SELECT form_number, name, stock FROM items WHERE id = ?", (item_id,))
                 item = cur.fetchone()
                 if item:
-                    st.write(f"Item: {item[0]}, Current Stock: {item[1]}")
+                    form_number = item[0] if item[0] else "N/A"
+                    st.write(f"Form Number: {form_number}, Item: {item[1]}, Current Stock: {item[2]}")
                     quantity = st.number_input(f"Quantity to {action}", min_value=1, step=1)
                     
                     if st.button(f"Confirm {action}"):
@@ -353,26 +395,42 @@ else:
 
     elif menu == "Generate Report":
         st.header("Generate Report")
-        month = st.number_input("Month (1-12)", min_value=1, max_value=12, step=1)
-        year = st.number_input("Year", min_value=2000, step=1, value=datetime.date.today().year)
+        report_type = st.selectbox("Report Type", ["Monthly Usage Report", "All Items Report"])
         
-        if st.button("Generate"):
-            usage = get_monthly_usage(month, year)
-            value = get_current_stock_value()
-            low_stock_items = get_low_stock_items()
-            st.write(f"Monthly Usage (Quantity Removed in {month}/{year}): {usage}")
-            st.write(f"Current Stock Value: ${value:.2f}")
-            
-            try:
-                pdf_bytes = generate_pdf_report(month, year, usage, value, low_stock_items)
-                st.download_button(
-                    label="Download PDF Report",
-                    data=pdf_bytes,
-                    file_name=f"report_{month}_{year}.pdf",
-                    mime="application/pdf"
-                )
-            except Exception as e:
-                st.error(f"Failed to generate PDF report: {e}")
+        if report_type == "Monthly Usage Report":
+            month = st.number_input("Month (1-12)", min_value=1, max_value=12, step=1)
+            year = st.number_input("Year", min_value=2000, step=1, value=datetime.date.today().year)
+        
+            if st.button("Generate"):
+                usage = get_monthly_usage(month, year)
+                value = get_current_stock_value()
+                low_stock_items = get_low_stock_items()
+                st.write(f"Monthly Usage (Quantity Removed in {month}/{year}): {usage}")
+                st.write(f"Current Stock Value: ${value:.2f}")
+                
+                try:
+                    pdf_bytes = generate_monthly_report(month, year, usage, value, low_stock_items)
+                    st.download_button(
+                        label="Download Monthly Usage Report",
+                        data=pdf_bytes,
+                        file_name=f"monthly_report_{month}_{year}.pdf",
+                        mime="application/pdf"
+                    )
+                except Exception as e:
+                    st.error(f"Failed to generate monthly report: {e}")
+        else:  # All Items Report
+            if st.button("Generate"):
+                items = get_all_items()
+                try:
+                    pdf_bytes = generate_all_items_report(items)
+                    st.download_button(
+                        label="Download All Items Report",
+                        data=pdf_bytes,
+                        file_name=f"all_items_report_{datetime.date.today()}.pdf",
+                        mime="application/pdf"
+                    )
+                except Exception as e:
+                    st.error(f"Failed to generate all items report: {e}")
 
     elif menu == "Reorder Reminders":
         st.header("Reorder Reminders")
@@ -385,20 +443,21 @@ else:
 
     elif menu == "QR Code List":
         st.header("QR Code List")
-        cur.execute("SELECT id, name, shelf, row, stock FROM items")
+        cur.execute("SELECT id, form_number, name, shelf, row, stock FROM items")
         items = cur.fetchall()
         
         if items:
             st.write("List of all items with QR codes:")
             for item in items:
-                item_id, name, shelf, row, stock = item
-                st.write(f"ID: {item_id}, Name: {name}, Shelf: {shelf}, Row: {row}, Stock: {stock}")
+                item_id, form_number, name, shelf, row, stock = item
+                form_number = form_number if form_number else "N/A"
+                st.write(f"ID: {item_id}, Form Number: {form_number}, Name: {name}, Shelf: {shelf}, Row: {row}, Stock: {stock}")
                 qr_bytes = generate_qr(item_id)
                 st.image(qr_bytes, caption=f"QR Code for {name} (ID: {item_id})", width=200)
                 st.download_button(
                     label=f"Download QR for {name}",
                     data=qr_bytes,
-                    file_name=f"qr_{item_id}_{name}.png",
+                    file_name=f"qr_{item_id}_{form_number}_{name}.png",
                     mime="image/png"
                 )
                 st.markdown("---")
