@@ -61,7 +61,7 @@ def sync_db_from_github():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 shelf INTEGER NOT NULL,
-                row INTEGER NOT NOT NULL,
+                row INTEGER NOT NULL,
                 price REAL NOT NULL,
                 stock INTEGER NOT NULL DEFAULT 0,
                 low_stock_threshold INTEGER NOT NULL DEFAULT 10
