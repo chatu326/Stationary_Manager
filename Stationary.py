@@ -37,11 +37,13 @@ def update_db_schema():
     columns = [info[1] for info in cur.fetchall()]
     if 'form_number' not in columns:
         try:
-            cur.execute("ALTER TABLE items ADD COLUMN form_number TEXT UNIQUE")
+            cur.execute("ALTER TABLE items ADD COLUMN form_number TEXT")
+            # Create unique index for form_number
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_form_number ON items(form_number)")
             conn.commit()
-            st.info("Added form_number column to items table.")
+            st.info("Added form_number column and unique index to items table.")
         except sqlite3.OperationalError as e:
-            st.error(f"Failed to add form_number column: {e}")
+            st.error(f"Failed to update schema: {e}")
     conn.close()
 
 # Clone or pull database from GitHub
@@ -76,7 +78,7 @@ def sync_db_from_github():
         cur.execute('''
             CREATE TABLE IF NOT EXISTS items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                form_number TEXT UNIQUE,
+                form_number TEXT,
                 name TEXT NOT NULL,
                 shelf INTEGER NOT NULL,
                 row INTEGER NOT NULL,
@@ -95,6 +97,8 @@ def sync_db_from_github():
                 user TEXT NOT NULL
             )
         ''')
+        # Create unique index for form_number
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_form_number ON items(form_number)")
         conn.commit()
         conn.close()
 
@@ -220,7 +224,6 @@ def get_low_stock_items():
 
 # Function to get all items for report
 def get_all_items():
-    # Check if form_number column exists
     cur.execute("PRAGMA table_info(items)")
     columns = [info[1] for info in cur.fetchall()]
     if 'form_number' in columns:
