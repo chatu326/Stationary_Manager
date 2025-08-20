@@ -7,40 +7,95 @@ from pyzbar.pyzbar import decode
 import datetime
 from fpdf import FPDF
 import hashlib
+import pygit2
+import os
+import shutil
 
-# Connect to SQLite database (creates if not exists)
+# GitHub repository details from Streamlit secrets
+REPO_OWNER = st.secrets["github"]["repo_owner"]
+REPO_NAME = st.secrets["github"]["repo_name"]
+BRANCH = st.secrets["github"]["branch"]
+GITHUB_TOKEN = st.secrets["github"]["token"]
+REPO_PATH = "./temp_repo"
+
+# Clone or pull database from GitHub
+def sync_db_from_github():
+    repo_url = f"https://{GITHUB_TOKEN}@github.com/{REPO_OWNER}/{REPO_NAME}.git"
+    db_path = "stationary.db"
+    
+    if os.path.exists(REPO_PATH):
+        shutil.rmtree(REPO_PATH)  # Clean up any existing repo
+    repo = pygit2.clone_repository(repo_url, REPO_PATH)
+    
+    db_source = os.path.join(REPO_PATH, db_path)
+    if os.path.exists(db_source):
+        shutil.copy(db_source, db_path)
+    else:
+        # Create empty database if it doesn't exist
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                shelf INTEGER NOT NULL,
+                row INTEGER NOT NULL,
+                price REAL NOT NULL,
+                stock INTEGER NOT NULL DEFAULT 0,
+                low_stock_threshold INTEGER NOT NULL DEFAULT 10
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS transactions (
+                trans_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id INTEGER NOT NULL,
+                trans_date DATE NOT NULL,
+                quantity INTEGER NOT NULL,
+                trans_type TEXT NOT NULL,
+                user TEXT NOT NULL
+            )
+        ''')
+        conn.commit()
+        conn.close()
+
+# Commit and push database to GitHub
+def sync_db_to_github():
+    db_path = "stationary.db"
+    repo = pygit2.Repository(REPO_PATH)
+    shutil.copy(db_path, os.path.join(REPO_PATH, db_path))
+    
+    index = repo.index
+    index.add(db_path)
+    index.write()
+    
+    author = pygit2.Signature("Stationary App", "app@example.com")
+    committer = author
+    tree = index.write_tree()
+    repo.create_commit(
+        f"refs/heads/{BRANCH}",
+        author,
+        committer,
+        "Update stationary.db",
+        tree,
+        [repo.head.target] if repo.head_is_unborn else [repo.head.target]
+    )
+    
+    remote = repo.remotes["origin"]
+    credentials = pygit2.UserPass(GITHUB_TOKEN, "x-oauth-basic")
+    remote.push([f"refs/heads/{BRANCH}"], callbacks=pygit2.RemoteCallbacks(credentials=credentials))
+
+# Sync database at startup
+sync_db_from_github()
+
+# Connect to SQLite database
 conn = sqlite3.connect('stationary.db', check_same_thread=False)
 cur = conn.cursor()
-
-# Create tables if they don't exist
-cur.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        username TEXT PRIMARY KEY,
-        password_hash TEXT NOT NULL
-    )
-''')
-cur.execute('''
-    CREATE TABLE IF NOT EXISTS items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        shelf INTEGER NOT NULL,
-        row INTEGER NOT NULL,
-        price REAL NOT NULL,
-        stock INTEGER NOT NULL DEFAULT 0,
-        low_stock_threshold INTEGER NOT NULL DEFAULT 10
-    )
-''')
-cur.execute('''
-    CREATE TABLE IF NOT EXISTS transactions (
-        trans_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        item_id INTEGER NOT NULL,
-        trans_date DATE NOT NULL,
-        quantity INTEGER NOT NULL,
-        trans_type TEXT NOT NULL,
-        user TEXT NOT NULL
-    )
-''')
-conn.commit()
 
 # Function to hash password
 def hash_password(password):
@@ -52,6 +107,7 @@ def add_user(username, password):
     try:
         cur.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, password_hash))
         conn.commit()
+        sync_db_to_github()  # Sync database to GitHub
         return True
     except sqlite3.IntegrityError:
         return False
@@ -79,6 +135,7 @@ def add_item(name, shelf, row, price, initial_stock, low_stock_threshold):
         (name, shelf, row, price, initial_stock, low_stock_threshold)
     )
     conn.commit()
+    sync_db_to_github()  # Sync database to GitHub
     item_id = cur.lastrowid
     qr_bytes = generate_qr(item_id)
     return item_id, qr_bytes
@@ -92,6 +149,7 @@ def update_stock(item_id, quantity, user):
         (item_id, datetime.date.today(), abs(quantity), trans_type, user)
     )
     conn.commit()
+    sync_db_to_github()  # Sync database to GitHub
 
 # Function to get monthly usage
 def get_monthly_usage(month, year):
@@ -128,6 +186,7 @@ def generate_pdf_report(month, year, usage, value, low_stock_items):
     pdf.cell(200, 10, txt="Reorder Reminders (Low Stock Items):", ln=1)
     if low_stock_items:
         for item in low_stock_items:
+ occlusion
             pdf.cell(200, 10, txt=f"ID: {item[0]}, Name: {item[1]}, Stock: {item[2]} (Threshold: {item[3]})", ln=1)
     else:
         pdf.cell(200, 10, txt="No low stock items.", ln=1)
@@ -147,13 +206,12 @@ def generate_qr_pdf():
     for item in items:
         item_id, name = item
         pdf.add_page()
-        pdf.cell(200, 10, txt=f"Item ID: {item_id}, Name: {name}", ln=1, align='C')
+        pdf.cell(200, 10, txt=f"Item ID: {item_id}, Name: {name}", ln=1, generate_pdf_report
         qr_bytes = generate_qr(item_id)
         with open(f"temp_qr_{item_id}.png", "wb") as f:
             f.write(qr_bytes)
         pdf.image(f"temp_qr_{item_id}.png", x=50, y=30, w=100)
         pdf.cell(200, 10, txt="Created by BOC Weerambugedara Team", ln=1, align='C')
-        import os
         os.remove(f"temp_qr_{item_id}.png")
     
     buf = BytesIO()
