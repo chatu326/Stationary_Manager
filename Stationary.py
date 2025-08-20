@@ -10,6 +10,7 @@ import hashlib
 import pygit2
 import os
 import shutil
+import tempfile
 
 # GitHub repository details from Streamlit secrets
 try:
@@ -213,9 +214,14 @@ def generate_pdf_report(month, year, usage, value, low_stock_items):
         pdf.cell(200, 10, txt="No low stock items.", ln=1)
     pdf.ln(10)
     pdf.cell(200, 10, txt="Created by BOC Weerambugedara Team", ln=1, align='C')
-    buf = BytesIO()
-    pdf.output(buf)
-    return buf.getvalue()
+    
+    # Write PDF to a temporary file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+        pdf.output(tmp_file.name)
+        tmp_file.seek(0)
+        pdf_bytes = tmp_file.read()
+    os.unlink(tmp_file.name)  # Clean up temporary file
+    return pdf_bytes
 
 # Function to generate PDF with all QR codes
 def generate_qr_pdf():
@@ -235,9 +241,13 @@ def generate_qr_pdf():
         pdf.cell(200, 10, txt="Created by BOC Weerambugedara Team", ln=1, align='C')
         os.remove(f"temp_qr_{item_id}.png")
     
-    buf = BytesIO()
-    pdf.output(buf)
-    return buf.getvalue()
+    # Write PDF to a temporary file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+        pdf.output(tmp_file.name)
+        tmp_file.seek(0)
+        pdf_bytes = tmp_file.read()
+    os.unlink(tmp_file.name)  # Clean up temporary file
+    return pdf_bytes
 
 # Streamlit App Layout
 st.title("Stationary Management System")
@@ -353,13 +363,16 @@ else:
             st.write(f"Monthly Usage (Quantity Removed in {month}/{year}): {usage}")
             st.write(f"Current Stock Value: ${value:.2f}")
             
-            pdf_bytes = generate_pdf_report(month, year, usage, value, low_stock_items)
-            st.download_button(
-                label="Download PDF Report",
-                data=pdf_bytes,
-                file_name=f"report_{month}_{year}.pdf",
-                mime="application/pdf"
-            )
+            try:
+                pdf_bytes = generate_pdf_report(month, year, usage, value, low_stock_items)
+                st.download_button(
+                    label="Download PDF Report",
+                    data=pdf_bytes,
+                    file_name=f"report_{month}_{year}.pdf",
+                    mime="application/pdf"
+                )
+            except Exception as e:
+                st.error(f"Failed to generate PDF report: {e}")
 
     elif menu == "Reorder Reminders":
         st.header("Reorder Reminders")
@@ -391,12 +404,15 @@ else:
                 st.markdown("---")
             
             if st.button("Download All QR Codes as PDF"):
-                pdf_bytes = generate_qr_pdf()
-                st.download_button(
-                    label="Download QR Code PDF",
-                    data=pdf_bytes,
-                    file_name="all_qr_codes.pdf",
-                    mime="application/pdf"
-                )
+                try:
+                    pdf_bytes = generate_qr_pdf()
+                    st.download_button(
+                        label="Download QR Code PDF",
+                        data=pdf_bytes,
+                        file_name="all_qr_codes.pdf",
+                        mime="application/pdf"
+                    )
+                except Exception as e:
+                    st.error(f"Failed to generate QR code PDF: {e}")
         else:
             st.info("No items found in the database.")
