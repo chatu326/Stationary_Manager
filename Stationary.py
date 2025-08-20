@@ -28,6 +28,22 @@ except KeyError as e:
     USE_GITHUB = False
 REPO_PATH = "./temp_repo"
 
+# Function to check and update database schema
+def update_db_schema():
+    conn = sqlite3.connect('stationary.db', check_same_thread=False)
+    cur = conn.cursor()
+    # Check if form_number column exists
+    cur.execute("PRAGMA table_info(items)")
+    columns = [info[1] for info in cur.fetchall()]
+    if 'form_number' not in columns:
+        try:
+            cur.execute("ALTER TABLE items ADD COLUMN form_number TEXT UNIQUE")
+            conn.commit()
+            st.info("Added form_number column to items table.")
+        except sqlite3.OperationalError as e:
+            st.error(f"Failed to add form_number column: {e}")
+    conn.close()
+
 # Clone or pull database from GitHub
 def sync_db_from_github():
     if not USE_GITHUB:
@@ -79,12 +95,7 @@ def sync_db_from_github():
                 user TEXT NOT NULL
             )
         ''')
-        # Add form_number column to existing items table if it doesn't exist
-        try:
-            cur.execute("ALTER TABLE items ADD COLUMN form_number TEXT UNIQUE")
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass  # Column already exists
+        conn.commit()
         conn.close()
 
 # Commit and push database to GitHub
@@ -119,8 +130,9 @@ def sync_db_to_github():
     except Exception as e:
         st.error(f"Failed to push database to GitHub: {e}. Check your GitHub token permissions.")
 
-# Sync database at startup
+# Sync database and update schema at startup
 sync_db_from_github()
+update_db_schema()
 
 # Connect to SQLite database
 conn = sqlite3.connect('stationary.db', check_same_thread=False)
@@ -208,7 +220,14 @@ def get_low_stock_items():
 
 # Function to get all items for report
 def get_all_items():
-    cur.execute("SELECT id, form_number, name, shelf, row, price, stock, low_stock_threshold FROM items")
+    # Check if form_number column exists
+    cur.execute("PRAGMA table_info(items)")
+    columns = [info[1] for info in cur.fetchall()]
+    if 'form_number' in columns:
+        query = "SELECT id, form_number, name, shelf, row, price, stock, low_stock_threshold FROM items"
+    else:
+        query = "SELECT id, NULL as form_number, name, shelf, row, price, stock, low_stock_threshold FROM items"
+    cur.execute(query)
     return cur.fetchall()
 
 # Function to generate monthly usage report
@@ -248,7 +267,7 @@ def generate_all_items_report(items):
     pdf.cell(200, 10, txt="Items List:", ln=1)
     if items:
         for item in items:
-            form_number = item[1] if item[1] else "N/A"  # Handle NULL form_number for existing items
+            form_number = item[1] if item[1] else "N/A"
             pdf.cell(200, 10, txt=f"ID: {item[0]}, Form Number: {form_number}, Name: {item[2]}, Shelf: {item[3]}, Row: {item[4]}, Price: ${item[5]:.2f}, Stock: {item[6]}, Threshold: {item[7]}", ln=1)
     else:
         pdf.cell(200, 10, txt="No items found.", ln=1)
@@ -266,7 +285,13 @@ def generate_all_items_report(items):
 def generate_qr_pdf():
     pdf = FPDF()
     pdf.set_font("Arial", size=12)
-    cur.execute("SELECT id, form_number, name FROM items")
+    cur.execute("PRAGMA table_info(items)")
+    columns = [info[1] for info in cur.fetchall()]
+    if 'form_number' in columns:
+        query = "SELECT id, form_number, name FROM items"
+    else:
+        query = "SELECT id, NULL as form_number, name FROM items"
+    cur.execute(query)
     items = cur.fetchall()
     
     for item in items:
@@ -377,7 +402,13 @@ else:
                 item_id = int(decoded_objects[0].data.decode('utf-8'))
                 st.success(f"Scanned Item ID: {item_id}")
                 
-                cur.execute("SELECT form_number, name, stock FROM items WHERE id = ?", (item_id,))
+                cur.execute("PRAGMA table_info(items)")
+                columns = [info[1] for info in cur.fetchall()]
+                if 'form_number' in columns:
+                    query = "SELECT form_number, name, stock FROM items WHERE id = ?"
+                else:
+                    query = "SELECT NULL as form_number, name, stock FROM items WHERE id = ?"
+                cur.execute(query, (item_id,))
                 item = cur.fetchone()
                 if item:
                     form_number = item[0] if item[0] else "N/A"
@@ -420,8 +451,8 @@ else:
                     st.error(f"Failed to generate monthly report: {e}")
         else:  # All Items Report
             if st.button("Generate"):
-                items = get_all_items()
                 try:
+                    items = get_all_items()
                     pdf_bytes = generate_all_items_report(items)
                     st.download_button(
                         label="Download All Items Report",
@@ -443,7 +474,13 @@ else:
 
     elif menu == "QR Code List":
         st.header("QR Code List")
-        cur.execute("SELECT id, form_number, name, shelf, row, stock FROM items")
+        cur.execute("PRAGMA table_info(items)")
+        columns = [info[1] for info in cur.fetchall()]
+        if 'form_number' in columns:
+            query = "SELECT id, form_number, name, shelf, row, stock FROM items"
+        else:
+            query = "SELECT id, NULL as form_number, name, shelf, row, stock FROM items"
+        cur.execute(query)
         items = cur.fetchall()
         
         if items:
