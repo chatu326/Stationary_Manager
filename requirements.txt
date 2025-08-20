@@ -3,3 +3,4 @@ qrcode
 pillow
 pyzbar
 fpdf
+pygit2
