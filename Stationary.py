@@ -38,10 +38,8 @@ def update_db_schema():
     if 'form_number' not in columns:
         try:
             cur.execute("ALTER TABLE items ADD COLUMN form_number TEXT")
-            # Create unique index for form_number
             cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_form_number ON items(form_number)")
             conn.commit()
-            st.info("Added form_number column and unique index to items table.")
         except sqlite3.OperationalError as e:
             st.error(f"Failed to update schema: {e}")
     conn.close()
@@ -97,7 +95,6 @@ def sync_db_from_github():
                 user TEXT NOT NULL
             )
         ''')
-        # Create unique index for form_number
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_form_number ON items(form_number)")
         conn.commit()
         conn.close()
