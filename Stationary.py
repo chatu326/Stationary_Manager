@@ -17,13 +17,21 @@ try:
     REPO_NAME = st.secrets["github"]["repo_name"]
     BRANCH = st.secrets["github"]["branch"]
     GITHUB_TOKEN = st.secrets["github"]["token"]
+    USE_GITHUB = True
 except KeyError as e:
-    st.error(f"Missing GitHub secret: {e}. Please configure [github] secrets in Streamlit Community Cloud settings.")
-    st.stop()
+    st.warning(f"GitHub secrets missing: {e}. Falling back to local database (no persistence across redeployments). Configure [github] secrets in Streamlit Community Cloud for persistence.")
+    REPO_OWNER = "local"
+    REPO_NAME = "local"
+    BRANCH = "main"
+    GITHUB_TOKEN = ""
+    USE_GITHUB = False
 REPO_PATH = "./temp_repo"
 
 # Clone or pull database from GitHub
 def sync_db_from_github():
+    if not USE_GITHUB:
+        st.info("Using local database. No GitHub sync performed.")
+        return
     repo_url = f"https://{GITHUB_TOKEN}@github.com/{REPO_OWNER}/{REPO_NAME}.git"
     db_path = "stationary.db"
     
@@ -32,7 +40,7 @@ def sync_db_from_github():
     try:
         repo = pygit2.clone_repository(repo_url, REPO_PATH)
     except Exception as e:
-        st.error(f"Failed to clone GitHub repository: {e}")
+        st.error(f"Failed to clone GitHub repository: {e}. Check your GitHub token and repository details.")
         st.stop()
     
     db_source = os.path.join(REPO_PATH, db_path)
@@ -53,7 +61,7 @@ def sync_db_from_github():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 shelf INTEGER NOT NULL,
-                row INTEGER NOT NULL,
+                row INTEGER NOT NOT NULL,
                 price REAL NOT NULL,
                 stock INTEGER NOT NULL DEFAULT 0,
                 low_stock_threshold INTEGER NOT NULL DEFAULT 10
@@ -74,6 +82,9 @@ def sync_db_from_github():
 
 # Commit and push database to GitHub
 def sync_db_to_github():
+    if not USE_GITHUB:
+        st.info("Using local database. No GitHub sync performed.")
+        return
     db_path = "stationary.db"
     repo = pygit2.Repository(REPO_PATH)
     shutil.copy(db_path, os.path.join(REPO_PATH, db_path))
@@ -99,7 +110,7 @@ def sync_db_to_github():
     try:
         remote.push([f"refs/heads/{BRANCH}"], callbacks=pygit2.RemoteCallbacks(credentials=credentials))
     except Exception as e:
-        st.error(f"Failed to push database to GitHub: {e}")
+        st.error(f"Failed to push database to GitHub: {e}. Check your GitHub token permissions.")
 
 # Sync database at startup
 sync_db_from_github()
