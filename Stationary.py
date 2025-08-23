@@ -219,6 +219,19 @@ def get_low_stock_items():
     cur.execute("SELECT id, name, stock, low_stock_threshold FROM items WHERE stock < low_stock_threshold")
     return cur.fetchall()
 
+# Function to search items by name or form_number
+def search_items(search_term):
+    search_term = f"%{search_term}%"
+    cur.execute("PRAGMA table_info(items)")
+    columns = [info[1] for info in cur.fetchall()]
+    if 'form_number' in columns:
+        query = "SELECT id, form_number, name, shelf, row, price, stock, low_stock_threshold FROM items WHERE name LIKE ? OR form_number LIKE ?"
+    else:
+        query = "SELECT id, NULL as form_number, name, shelf, row, price, stock, low_stock_threshold FROM items WHERE name LIKE ?"
+        search_term = (search_term, search_term) if 'form_number' in columns else (search_term,)
+    cur.execute(query, (search_term, search_term) if 'form_number' in columns else (search_term,))
+    return cur.fetchall()
+
 # Function to get all items for report
 def get_all_items():
     cur.execute("PRAGMA table_info(items)")
@@ -361,9 +374,23 @@ else:
         st.session_state.user = None
         st.rerun()
 
-    menu = st.sidebar.selectbox("Menu", ["Add New Item", "Add Stock", "Remove Stock", "Generate Report", "Reorder Reminders", "QR Code List"])
+    menu = st.sidebar.selectbox("Menu", ["Search Items", "Add New Item", "Add Stock", "Remove Stock", "Generate Report", "Reorder Reminders", "QR Code List"])
 
-    if menu == "Add New Item":
+    if menu == "Search Items":
+        st.header("Search Items")
+        search_term = st.text_input("Search by Name or Form Number")
+        if search_term:
+            items = search_items(search_term)
+            if items:
+                for item in items:
+                    item_id, form_number, name, shelf, row, price, stock, low_stock_threshold = item
+                    form_number = form_number if form_number else "N/A"
+                    st.write(f"ID: {item_id}, Form Number: {form_number}, Name: {name}, Shelf: {shelf}, Row: {row}, Price: ${price:.2f}, Stock: {stock}, Threshold: {low_stock_threshold}")
+                    st.markdown("---")
+            else:
+                st.info("No items found matching the search term.")
+
+    elif menu == "Add New Item":
         st.header("Add New Item")
         form_number = st.text_input("Item/Form Number (must be unique)")
         name = st.text_input("Item Name")
