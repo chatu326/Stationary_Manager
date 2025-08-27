@@ -53,7 +53,7 @@ def sync_db_from_github():
     db_path = "stationary.db"
     
     if os.path.exists(REPO_PATH):
-        shutil.rmtree(REPO_PATH)  # Clean up any existing repo
+        shutil.rmtree(REPO_PATH, ignore_errors=True)  # Clean up any existing repo
     try:
         repo = pygit2.clone_repository(repo_url, REPO_PATH)
     except Exception as e:
@@ -374,7 +374,7 @@ else:
         st.session_state.user = None
         st.rerun()
 
-    menu = st.sidebar.selectbox("Menu", ["Search Items", "Add New Item", "Add Stock", "Remove Stock", "Generate Report", "Reorder Reminders", "QR Code List"])
+    menu = st.sidebar.selectbox("Menu", ["Search Items", "Add New Item", "Add Stock", "Remove Stock", "Generate Report", "Reorder Reminders", "QR Code List", "Admin Panel"])
 
     if menu == "Search Items":
         st.header("Search Items")
@@ -538,3 +538,39 @@ else:
                     st.error(f"Failed to generate QR code PDF: {e}")
         else:
             st.info("No items found in the database.")
+    elif menu == "Admin Panel":
+        st.header("Admin Panel")
+        if st.session_state.user == "admin":  # Replace with your admin username
+            tab1, tab2 = st.tabs(["Delete Users", "Delete Items"])
+            
+            with tab1:
+                st.subheader("Delete Users")
+                cur.execute("SELECT username FROM users")
+                users = [row[0] for row in cur.fetchall()]
+                selected_user = st.selectbox("Select User to Delete", options=users)
+                if st.button("Delete User"):
+                    if selected_user == "admin":
+                        st.error("Cannot delete admin user.")
+                    else:
+                        cur.execute("DELETE FROM users WHERE username = ?", (selected_user,))
+                        conn.commit()
+                        sync_db_to_github()  # Sync database to GitHub
+                        st.success(f"User {selected_user} deleted successfully.")
+            
+            with tab2:
+                st.subheader("Delete Items")
+                cur.execute("SELECT id, form_number, name FROM items")
+                items = cur.fetchall()
+                if items:
+                    selected_item = st.selectbox("Select Item to Delete", options=[f"ID: {item[0]}, Form Number: {item[1] if item[1] else 'N/A'}, Name: {item[2]}" for item in items])
+                    item_id = int(selected_item.split(",")[0].split(":")[1].strip())
+                    if st.button("Delete Item"):
+                        cur.execute("DELETE FROM items WHERE id = ?", (item_id,))
+                        cur.execute("DELETE FROM transactions WHERE item_id = ?", (item_id,))
+                        conn.commit()
+                        sync_db_to_github()  # Sync database to GitHub
+                        st.success(f"Item ID {item_id} deleted successfully.")
+                else:
+                    st.info("No items available.")
+        else:
+            st.error("Access denied. Admin only.")
