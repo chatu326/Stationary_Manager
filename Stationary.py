@@ -389,7 +389,6 @@ else:
                     st.markdown("---")
             else:
                 st.info("No items found matching the search term.")
-
     elif menu == "Add New Item":
         st.header("Add New Item")
         form_number = st.text_input("Item/Form Number (must be unique)")
@@ -406,7 +405,7 @@ else:
                 if item_id:
                     st.success(f"Item added with ID: {item_id}")
                     st.write(f"Form Number: {form_number}, Name: {name}, Shelf: {shelf}, Row: {row}, Price: ${price:.2f}, Stock: {initial_stock}, Threshold: {low_stock_threshold}")
-                    st.image(qr_bytes, caption=f"QR Code for Item ID {item_id}", use_column_width=True)
+                    st.image(qr_bytes, caption=f"QR Code for Item ID {item_id}", use_container_width=True)
                     st.download_button(
                         label="Download QR Code",
                         data=qr_bytes,
