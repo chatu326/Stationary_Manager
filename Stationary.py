@@ -51,6 +51,18 @@ def update_db_schema():
             conn.commit()
         except sqlite3.OperationalError as e:
             st.error(f"Failed to update users schema: {e}")
+    # Ensure default admin user exists
+    admin_password = "Admin123!"
+    password_hash = hashlib.sha256(admin_password.encode()).hexdigest()
+    cur.execute("SELECT * FROM users WHERE username = 'admin'")
+    if cur.fetchone() is None:
+        try:
+            cur.execute("INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)", 
+                       ("admin", password_hash))
+            conn.commit()
+            # st.info("Created default admin user (username: admin, password: Admin123!).")
+        except sqlite3.IntegrityError:
+            pass
     conn.close()
 
 # Clone or pull database from GitHub
@@ -106,15 +118,7 @@ def sync_db_from_github():
             )
         ''')
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_form_number ON items(form_number)")
-        # Create default admin user (username: admin, password: Admin123!)
-        admin_password = "Admin123!"
-        password_hash = hashlib.sha256(admin_password.encode()).hexdigest()
-        try:
-            cur.execute("INSERT OR IGNORE INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)", 
-                       ("admin", password_hash, 1))
-            conn.commit()
-        except sqlite3.IntegrityError:
-            pass
+        conn.commit()
         conn.close()
 
 # Commit and push database to GitHub
