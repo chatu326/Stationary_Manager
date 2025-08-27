@@ -32,7 +32,7 @@ REPO_PATH = "./temp_repo"
 def update_db_schema():
     conn = sqlite3.connect('stationary.db', check_same_thread=False)
     cur = conn.cursor()
-    # Check if form_number column exists
+    # Check and add form_number column to items table
     cur.execute("PRAGMA table_info(items)")
     columns = [info[1] for info in cur.fetchall()]
     if 'form_number' not in columns:
@@ -41,7 +41,16 @@ def update_db_schema():
             cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_form_number ON items(form_number)")
             conn.commit()
         except sqlite3.OperationalError as e:
-            st.error(f"Failed to update schema: {e}")
+            st.error(f"Failed to update items schema: {e}")
+    # Check and add is_admin column to users table
+    cur.execute("PRAGMA table_info(users)")
+    columns = [info[1] for info in cur.fetchall()]
+    if 'is_admin' not in columns:
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT 0")
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            st.error(f"Failed to update users schema: {e}")
     conn.close()
 
 # Clone or pull database from GitHub
@@ -53,7 +62,7 @@ def sync_db_from_github():
     db_path = "stationary.db"
     
     if os.path.exists(REPO_PATH):
-        shutil.rmtree(REPO_PATH, ignore_errors=True)  # Clean up any existing repo
+        shutil.rmtree(REPO_PATH)  # Clean up any existing repo
     try:
         repo = pygit2.clone_repository(repo_url, REPO_PATH)
     except Exception as e:
@@ -70,7 +79,8 @@ def sync_db_from_github():
         cur.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 username TEXT PRIMARY KEY,
-                password_hash TEXT NOT NULL
+                password_hash TEXT NOT NULL,
+                is_admin BOOLEAN DEFAULT 0
             )
         ''')
         cur.execute('''
@@ -96,7 +106,15 @@ def sync_db_from_github():
             )
         ''')
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_form_number ON items(form_number)")
-        conn.commit()
+        # Create default admin user (username: admin, password: Admin123!)
+        admin_password = "Admin123!"
+        password_hash = hashlib.sha256(admin_password.encode()).hexdigest()
+        try:
+            cur.execute("INSERT OR IGNORE INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)", 
+                       ("admin", password_hash, 1))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            pass
         conn.close()
 
 # Commit and push database to GitHub
@@ -147,7 +165,7 @@ def hash_password(password):
 def add_user(username, password):
     password_hash = hash_password(password)
     try:
-        cur.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, password_hash))
+        cur.execute("INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 0)", (username, password_hash))
         conn.commit()
         sync_db_to_github()  # Sync database to GitHub
         return True
@@ -159,6 +177,35 @@ def verify_user(username, password):
     password_hash = hash_password(password)
     cur.execute("SELECT * FROM users WHERE username = ? AND password_hash = ?", (username, password_hash))
     return cur.fetchone() is not None
+
+# Function to check if user is admin
+def is_admin_user(username):
+    cur.execute("SELECT is_admin FROM users WHERE username = ?", (username,))
+    result = cur.fetchone()
+    return result and result[0] == 1
+
+# Function to delete a user
+def delete_user(username):
+    try:
+        cur.execute("DELETE FROM users WHERE username = ?", (username,))
+        conn.commit()
+        sync_db_to_github()  # Sync database to GitHub
+        return True
+    except sqlite3.Error as e:
+        st.error(f"Failed to delete user: {e}")
+        return False
+
+# Function to delete an item
+def delete_item(item_id):
+    try:
+        cur.execute("DELETE FROM items WHERE id = ?", (item_id,))
+        cur.execute("DELETE FROM transactions WHERE item_id = ?", (item_id,))
+        conn.commit()
+        sync_db_to_github()  # Sync database to GitHub
+        return True
+    except sqlite3.Error as e:
+        st.error(f"Failed to delete item: {e}")
+        return False
 
 # Function to generate QR code for an item
 def generate_qr(item_id):
@@ -374,7 +421,11 @@ else:
         st.session_state.user = None
         st.rerun()
 
-    menu = st.sidebar.selectbox("Menu", ["Search Items", "Add New Item", "Add Stock", "Remove Stock", "Generate Report", "Reorder Reminders", "QR Code List", "Admin Panel"])
+    # Menu options, include Admin Panel only for admins
+    menu_options = ["Search Items", "Add New Item", "Add Stock", "Remove Stock", "Generate Report", "Reorder Reminders", "QR Code List"]
+    if is_admin_user(st.session_state.user):
+        menu_options.append("Admin Panel")
+    menu = st.sidebar.selectbox("Menu", menu_options)
 
     if menu == "Search Items":
         st.header("Search Items")
@@ -389,6 +440,7 @@ else:
                     st.markdown("---")
             else:
                 st.info("No items found matching the search term.")
+
     elif menu == "Add New Item":
         st.header("Add New Item")
         form_number = st.text_input("Item/Form Number (must be unique)")
@@ -538,39 +590,43 @@ else:
                     st.error(f"Failed to generate QR code PDF: {e}")
         else:
             st.info("No items found in the database.")
+
     elif menu == "Admin Panel":
         st.header("Admin Panel")
-        if st.session_state.user == "admin":  # Replace with your admin username
-            tab1, tab2 = st.tabs(["Delete Users", "Delete Items"])
-            
-            with tab1:
-                st.subheader("Delete Users")
-                cur.execute("SELECT username FROM users")
-                users = [row[0] for row in cur.fetchall()]
-                selected_user = st.selectbox("Select User to Delete", options=users)
-                if st.button("Delete User"):
-                    if selected_user == "admin":
-                        st.error("Cannot delete admin user.")
+        if is_admin_user(st.session_state.user):
+            st.subheader("Manage Users")
+            cur.execute("SELECT username, is_admin FROM users")
+            users = cur.fetchall()
+            if users:
+                st.write("List of Users:")
+                for user in users:
+                    username, is_admin = user
+                    if username != st.session_state.user:  # Prevent deleting self
+                        st.write(f"Username: {username}, Admin: {'Yes' if is_admin else 'No'}")
+                        if st.button(f"Delete {username}", key=f"delete_user_{username}"):
+                            if delete_user(username):
+                                st.success(f"User {username} deleted successfully.")
+                                st.rerun()
                     else:
-                        cur.execute("DELETE FROM users WHERE username = ?", (selected_user,))
-                        conn.commit()
-                        sync_db_to_github()  # Sync database to GitHub
-                        st.success(f"User {selected_user} deleted successfully.")
+                        st.write(f"Username: {username} (You, Admin)")
+                    st.markdown("---")
+            else:
+                st.info("No users found in the database.")
             
-            with tab2:
-                st.subheader("Delete Items")
-                cur.execute("SELECT id, form_number, name FROM items")
-                items = cur.fetchall()
-                if items:
-                    selected_item = st.selectbox("Select Item to Delete", options=[f"ID: {item[0]}, Form Number: {item[1] if item[1] else 'N/A'}, Name: {item[2]}" for item in items])
-                    item_id = int(selected_item.split(",")[0].split(":")[1].strip())
-                    if st.button("Delete Item"):
-                        cur.execute("DELETE FROM items WHERE id = ?", (item_id,))
-                        cur.execute("DELETE FROM transactions WHERE item_id = ?", (item_id,))
-                        conn.commit()
-                        sync_db_to_github()  # Sync database to GitHub
-                        st.success(f"Item ID {item_id} deleted successfully.")
-                else:
-                    st.info("No items available.")
+            st.subheader("Manage Items")
+            items = get_all_items()
+            if items:
+                st.write("List of Items:")
+                for item in items:
+                    item_id, form_number, name, shelf, row, price, stock, low_stock_threshold = item
+                    form_number = form_number if form_number else "N/A"
+                    st.write(f"ID: {item_id}, Form Number: {form_number}, Name: {name}, Shelf: {shelf}, Row: {row}, Price: ${price:.2f}, Stock: {stock}, Threshold: {low_stock_threshold}")
+                    if st.button(f"Delete Item {item_id}", key=f"delete_item_{item_id}"):
+                        if delete_item(item_id):
+                            st.success(f"Item {name} (ID: {item_id}) deleted successfully.")
+                            st.rerun()
+                    st.markdown("---")
+            else:
+                st.info("No items found in the database.")
         else:
-            st.error("Access denied. Admin only.")
+            st.error("Access denied. You are not an admin.")
