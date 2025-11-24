@@ -60,7 +60,6 @@ def update_db_schema():
             cur.execute("INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)", 
                        ("admin", password_hash))
             conn.commit()
-            # st.info("Created default admin user (username: admin, password: Admin123!).")
         except sqlite3.IntegrityError:
             pass
     conn.close()
@@ -74,7 +73,7 @@ def sync_db_from_github():
     db_path = "stationary.db"
     
     if os.path.exists(REPO_PATH):
-        shutil.rmtree(REPO_PATH)  # Clean up any existing repo
+        shutil.rmtree(REPO_PATH)
     try:
         repo = pygit2.clone_repository(repo_url, REPO_PATH)
     except Exception as e:
@@ -85,7 +84,6 @@ def sync_db_from_github():
     if os.path.exists(db_source):
         shutil.copy(db_source, db_path)
     else:
-        # Create empty database if it doesn't exist
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
         cur.execute('''
@@ -171,7 +169,7 @@ def add_user(username, password):
     try:
         cur.execute("INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 0)", (username, password_hash))
         conn.commit()
-        sync_db_to_github()  # Sync database to GitHub
+        sync_db_to_github()
         return True
     except sqlite3.IntegrityError:
         return False
@@ -193,7 +191,7 @@ def delete_user(username):
     try:
         cur.execute("DELETE FROM users WHERE username = ?", (username,))
         conn.commit()
-        sync_db_to_github()  # Sync database to GitHub
+        sync_db_to_github()
         return True
     except sqlite3.Error as e:
         st.error(f"Failed to delete user: {e}")
@@ -205,10 +203,28 @@ def delete_item(item_id):
         cur.execute("DELETE FROM items WHERE id = ?", (item_id,))
         cur.execute("DELETE FROM transactions WHERE item_id = ?", (item_id,))
         conn.commit()
-        sync_db_to_github()  # Sync database to GitHub
+        sync_db_to_github()
         return True
     except sqlite3.Error as e:
         st.error(f"Failed to delete item: {e}")
+        return False
+
+# Function to update an item
+def update_item(item_id, form_number, name, shelf, row, price, low_stock_threshold):
+    try:
+        cur.execute("""
+            UPDATE items 
+            SET form_number = ?, name = ?, shelf = ?, row = ?, price = ?, low_stock_threshold = ?
+            WHERE id = ?
+        """, (form_number, name, shelf, row, price, low_stock_threshold, item_id))
+        conn.commit()
+        sync_db_to_github()
+        return True
+    except sqlite3.IntegrityError as e:
+        st.error("Form number already exists. Please use a unique form number.")
+        return False
+    except sqlite3.Error as e:
+        st.error(f"Database error: {e}")
         return False
 
 # Function to generate QR code for an item
@@ -229,7 +245,7 @@ def add_item(form_number, name, shelf, row, price, initial_stock, low_stock_thre
             (form_number, name, shelf, row, price, initial_stock, low_stock_threshold)
         )
         conn.commit()
-        sync_db_to_github()  # Sync database to GitHub
+        sync_db_to_github()
         item_id = cur.lastrowid
         qr_bytes = generate_qr(item_id)
         return item_id, qr_bytes
@@ -246,7 +262,7 @@ def update_stock(item_id, quantity, user):
         (item_id, datetime.date.today(), abs(quantity), trans_type, user)
     )
     conn.commit()
-    sync_db_to_github()  # Sync database to GitHub
+    sync_db_to_github()
 
 # Function to get monthly usage
 def get_monthly_usage(month, year):
@@ -279,19 +295,12 @@ def search_items(search_term):
         query = "SELECT id, form_number, name, shelf, row, price, stock, low_stock_threshold FROM items WHERE name LIKE ? OR form_number LIKE ?"
     else:
         query = "SELECT id, NULL as form_number, name, shelf, row, price, stock, low_stock_threshold FROM items WHERE name LIKE ?"
-        search_term = (search_term, search_term) if 'form_number' in columns else (search_term,)
     cur.execute(query, (search_term, search_term) if 'form_number' in columns else (search_term,))
     return cur.fetchall()
 
 # Function to get all items for report
 def get_all_items():
-    cur.execute("PRAGMA table_info(items)")
-    columns = [info[1] for info in cur.fetchall()]
-    if 'form_number' in columns:
-        query = "SELECT id, form_number, name, shelf, row, price, stock, low_stock_threshold FROM items"
-    else:
-        query = "SELECT id, NULL as form_number, name, shelf, row, price, stock, low_stock_threshold FROM items"
-    cur.execute(query)
+    cur.execute("SELECT id, form_number, name, shelf, row, price, stock, low_stock_threshold FROM items")
     return cur.fetchall()
 
 # Function to generate monthly usage report
@@ -349,13 +358,7 @@ def generate_all_items_report(items):
 def generate_qr_pdf():
     pdf = FPDF()
     pdf.set_font("Arial", size=12)
-    cur.execute("PRAGMA table_info(items)")
-    columns = [info[1] for info in cur.fetchall()]
-    if 'form_number' in columns:
-        query = "SELECT id, form_number, name FROM items"
-    else:
-        query = "SELECT id, NULL as form_number, name FROM items"
-    cur.execute(query)
+    cur.execute("SELECT id, form_number, name FROM items")
     items = cur.fetchall()
     
     for item in items:
@@ -425,7 +428,7 @@ else:
         st.session_state.user = None
         st.rerun()
 
-    # Menu options, include Admin Panel only for admins
+    # Menu options
     menu_options = ["Search Items", "Add New Item", "Add Stock", "Remove Stock", "Generate Report", "Reorder Reminders", "QR Code List"]
     if is_admin_user(st.session_state.user):
         menu_options.append("Admin Panel")
@@ -484,17 +487,12 @@ else:
                 item_id = int(decoded_objects[0].data.decode('utf-8'))
                 st.success(f"Scanned Item ID: {item_id}")
                 
-                cur.execute("PRAGMA table_info(items)")
-                columns = [info[1] for info in cur.fetchall()]
-                if 'form_number' in columns:
-                    query = "SELECT form_number, name, stock FROM items WHERE id = ?"
-                else:
-                    query = "SELECT NULL as form_number, name, stock FROM items WHERE id = ?"
-                cur.execute(query, (item_id,))
+                cur.execute("SELECT form_number, name, stock FROM items WHERE id = ?", (item_id,))
                 item = cur.fetchone()
                 if item:
-                    form_number = item[0] if item[0] else "N/A"
-                    st.write(f"Form Number: {form_number}, Item: {item[1]}, Current Stock: {item[2]}")
+                    form_number, name, stock = item
+                    form_number = form_number if form_number else "N/A"
+                    st.write(f"Form Number: {form_number}, Item: {name}, Current Stock: {stock}")
                     quantity = st.number_input(f"Quantity to {action}", min_value=1, step=1)
                     
                     if st.button(f"Confirm {action}"):
@@ -531,7 +529,7 @@ else:
                     )
                 except Exception as e:
                     st.error(f"Failed to generate monthly report: {e}")
-        else:  # All Items Report
+        else:
             if st.button("Generate"):
                 try:
                     items = get_all_items()
@@ -556,13 +554,7 @@ else:
 
     elif menu == "QR Code List":
         st.header("QR Code List")
-        cur.execute("PRAGMA table_info(items)")
-        columns = [info[1] for info in cur.fetchall()]
-        if 'form_number' in columns:
-            query = "SELECT id, form_number, name, shelf, row, stock FROM items"
-        else:
-            query = "SELECT id, NULL as form_number, name, shelf, row, stock FROM items"
-        cur.execute(query)
+        cur.execute("SELECT id, form_number, name, shelf, row, stock FROM items")
         items = cur.fetchall()
         
         if items:
@@ -597,40 +589,81 @@ else:
 
     elif menu == "Admin Panel":
         st.header("Admin Panel")
-        if is_admin_user(st.session_state.user):
+        if not is_admin_user(st.session_state.user):
+            st.error("Access denied. You are not an admin.")
+            st.stop()
+
+        tab1, tab2 = st.tabs(["Manage Users", "Manage Items"])
+
+        with tab1:
             st.subheader("Manage Users")
             cur.execute("SELECT username, is_admin FROM users")
             users = cur.fetchall()
             if users:
-                st.write("List of Users:")
                 for user in users:
                     username, is_admin = user
-                    if username != st.session_state.user:  # Prevent deleting self
-                        st.write(f"Username: {username}, Admin: {'Yes' if is_admin else 'No'}")
-                        if st.button(f"Delete {username}", key=f"delete_user_{username}"):
-                            if delete_user(username):
-                                st.success(f"User {username} deleted successfully.")
-                                st.rerun()
-                    else:
-                        st.write(f"Username: {username} (You, Admin)")
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.write(f"**{username}** - {'Admin' if is_admin else 'Regular User'}")
+                    with col2:
+                        if username != st.session_state.user:
+                            if st.button("Delete", key=f"del_user_{username}"):
+                                if delete_user(username):
+                                    st.success(f"User {username} deleted.")
+                                    st.rerun()
+                        else:
+                            st.write("*Current user*")
                     st.markdown("---")
             else:
-                st.info("No users found in the database.")
-            
-            st.subheader("Manage Items")
+                st.info("No users found.")
+
+        with tab2:
+            st.subheader("Edit / Delete Items")
             items = get_all_items()
-            if items:
-                st.write("List of Items:")
-                for item in items:
-                    item_id, form_number, name, shelf, row, price, stock, low_stock_threshold = item
-                    form_number = form_number if form_number else "N/A"
-                    st.write(f"ID: {item_id}, Form Number: {form_number}, Name: {name}, Shelf: {shelf}, Row: {row}, Price: ${price:.2f}, Stock: {stock}, Threshold: {low_stock_threshold}")
-                    if st.button(f"Delete Item {item_id}", key=f"delete_item_{item_id}"):
-                        if delete_item(item_id):
-                            st.success(f"Item {name} (ID: {item_id}) deleted successfully.")
-                            st.rerun()
-                    st.markdown("---")
+            if not items:
+                st.info("No items in database.")
             else:
-                st.info("No items found in the database.")
-        else:
-            st.error("Access denied. You are not an admin.")
+                for item in items:
+                    item_id, form_number, name, shelf, row, price, stock, threshold = item
+                    form_number = form_number or "N/A"
+                    
+                    with st.expander(f"ID: {item_id} | {form_number} - {name} | Stock: {stock}"):
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            st.write(f"**Current Values:**")
+                            st.write(f"Form Number: `{form_number}` | Shelf: {shelf} | Row: {row}")
+                            st.write(f"Price: ${price:.2f} | Low Stock Threshold: {threshold}")
+                        
+                        with col2:
+                            if st.button("Delete Item", key=f"del_item_{item_id}"):
+                                if delete_item(item_id):
+                                    st.success(f"Item {name} (ID: {item_id}) deleted.")
+                                    st.rerun()
+
+                        st.markdown("**Edit Item**")
+                        with st.form(key=f"edit_form_{item_id}"):
+                            new_form = st.text_input("Form Number", value=form_number if form_number != "N/A" else "", key=f"form_{item_id}")
+                            new_name = st.text_input("Item Name", value=name, key=f"name_{item_id}")
+                            new_shelf = st.number_input("Shelf", min_value=1, value=shelf, key=f"shelf_{item_id}")
+                            new_row = st.number_input("Row", min_value=1, value=row, key=f"row_{item_id}")
+                            new_price = st.number_input("Price", min_value=0.0, step=0.01, value=float(price), key=f"price_{item_id}")
+                            new_threshold = st.number_input("Low Stock Threshold", min_value=1, value=threshold, key=f"thresh_{item_id}")
+                            
+                            if st.form_submit_button("Save Changes"):
+                                if new_form == "":
+                                    st.error("Form number cannot be empty.")
+                                elif update_item(item_id, new_form if new_form else None, new_name, new_shelf, new_row, new_price, new_threshold):
+                                    st.success(f"Item {name} updated successfully!")
+                                    st.rerun()
+                        
+                        # Show new QR code after edit
+                        st.markdown("**Updated QR Code**")
+                        st.image(generate_qr(item_id), caption=f"QR Code for Item ID {item_id}", width=200)
+                        st.download_button(
+                            "Download Updated QR",
+                            data=generate_qr(item_id),
+                            file_name=f"qr_{item_id}_{new_form or form_number}_{name}.png",
+                            mime="image/png",
+                            key=f"dl_qr_{item_id}"
+                        )
+                        st.markdown("---")
