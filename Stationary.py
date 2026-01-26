@@ -12,10 +12,7 @@ import os
 import shutil
 import tempfile
 
-# ─────────────────────────────────────────────────────────────
-# GitHub / Database Sync Setup
-# ─────────────────────────────────────────────────────────────
-
+# GitHub repository details from Streamlit secrets
 try:
     REPO_OWNER = st.secrets["github"]["repo_owner"]
     REPO_NAME = st.secrets["github"]["repo_name"]
@@ -23,18 +20,19 @@ try:
     GITHUB_TOKEN = st.secrets["github"]["token"]
     USE_GITHUB = True
 except KeyError as e:
-    st.warning(f"GitHub secrets missing: {e}. Using local database only.")
+    st.warning(f"GitHub secrets missing: {e}. Falling back to local database (no persistence across redeployments). Configure [github] secrets in Streamlit Community Cloud for persistence.")
     REPO_OWNER = "local"
     REPO_NAME = "local"
     BRANCH = "main"
     GITHUB_TOKEN = ""
     USE_GITHUB = False
-
 REPO_PATH = "./temp_repo"
 
+# Function to check and update database schema
 def update_db_schema():
     conn = sqlite3.connect('stationary.db', check_same_thread=False)
     cur = conn.cursor()
+    # Check and add form_number column to items table
     cur.execute("PRAGMA table_info(items)")
     columns = [info[1] for info in cur.fetchall()]
     if 'form_number' not in columns:
@@ -43,96 +41,193 @@ def update_db_schema():
             cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_form_number ON items(form_number)")
             conn.commit()
         except sqlite3.OperationalError as e:
-            pass  # silent if already exists
+            st.error(f"Failed to update items schema: {e}")
+    # Check and add is_admin column to users table
     cur.execute("PRAGMA table_info(users)")
     columns = [info[1] for info in cur.fetchall()]
     if 'is_admin' not in columns:
         try:
             cur.execute("ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT 0")
             conn.commit()
-        except sqlite3.OperationalError:
-            pass
-    # Default admin
-    admin_pw_hash = hashlib.sha256("Admin123!".encode()).hexdigest()
+        except sqlite3.OperationalError as e:
+            st.error(f"Failed to update users schema: {e}")
+    # Ensure default admin user exists
+    admin_password = "Admin123!"
+    password_hash = hashlib.sha256(admin_password.encode()).hexdigest()
     cur.execute("SELECT * FROM users WHERE username = 'admin'")
-    if not cur.fetchone():
-        cur.execute("INSERT OR IGNORE INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)",
-                    ("admin", admin_pw_hash))
-        conn.commit()
+    if cur.fetchone() is None:
+        try:
+            cur.execute("INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)", 
+                       ("admin", password_hash))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            pass
     conn.close()
 
+# Clone or pull database from GitHub
 def sync_db_from_github():
     if not USE_GITHUB:
+        st.info("Using local database. No GitHub sync performed.")
         return
     repo_url = f"https://{GITHUB_TOKEN}@github.com/{REPO_OWNER}/{REPO_NAME}.git"
+    db_path = "stationary.db"
+    
     if os.path.exists(REPO_PATH):
         shutil.rmtree(REPO_PATH)
     try:
-        pygit2.clone_repository(repo_url, REPO_PATH)
+        repo = pygit2.clone_repository(repo_url, REPO_PATH)
     except Exception as e:
-        st.error(f"GitHub clone failed: {e}")
+        st.error(f"Failed to clone GitHub repository: {e}. Check your GitHub token and repository details.")
         st.stop()
-
-    db_source = os.path.join(REPO_PATH, "stationary.db")
+    
+    db_source = os.path.join(REPO_PATH, db_path)
     if os.path.exists(db_source):
-        shutil.copy(db_source, "stationary.db")
+        shutil.copy(db_source, db_path)
     else:
-        conn = sqlite3.connect("stationary.db")
+        conn = sqlite3.connect(db_path)
         cur = conn.cursor()
-        cur.execute('''CREATE TABLE IF NOT EXISTS users (
-            username TEXT PRIMARY KEY, password_hash TEXT NOT NULL, is_admin BOOLEAN DEFAULT 0)''')
-        cur.execute('''CREATE TABLE IF NOT EXISTS items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, form_number TEXT, name TEXT NOT NULL,
-            shelf INTEGER NOT NULL, row INTEGER NOT NULL, price REAL NOT NULL,
-            stock INTEGER NOT NULL DEFAULT 0, low_stock_threshold INTEGER NOT NULL DEFAULT 10)''')
-        cur.execute('''CREATE TABLE IF NOT EXISTS transactions (
-            trans_id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL,
-            trans_date DATE NOT NULL, quantity INTEGER NOT NULL,
-            trans_type TEXT NOT NULL, user TEXT NOT NULL)''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                is_admin BOOLEAN DEFAULT 0
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                form_number TEXT,
+                name TEXT NOT NULL,
+                shelf INTEGER NOT NULL,
+                row INTEGER NOT NULL,
+                price REAL NOT NULL,
+                stock INTEGER NOT NULL DEFAULT 0,
+                low_stock_threshold INTEGER NOT NULL DEFAULT 10
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS transactions (
+                trans_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id INTEGER NOT NULL,
+                trans_date DATE NOT NULL,
+                quantity INTEGER NOT NULL,
+                trans_type TEXT NOT NULL,
+                user TEXT NOT NULL
+            )
+        ''')
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_form_number ON items(form_number)")
         conn.commit()
         conn.close()
 
+# Commit and push database to GitHub
 def sync_db_to_github():
     if not USE_GITHUB:
+        st.info("Using local database. No GitHub sync performed.")
         return
     db_path = "stationary.db"
     repo = pygit2.Repository(REPO_PATH)
     shutil.copy(db_path, os.path.join(REPO_PATH, db_path))
+    
     index = repo.index
     index.add(db_path)
     index.write()
-    tree = index.write_tree()
+    
     author = pygit2.Signature("Stationary App", "app@example.com")
-    repo.create_commit(f"refs/heads/{BRANCH}", author, author, "Update db", tree, [repo.head.target])
+    committer = author
+    tree = index.write_tree()
+    repo.create_commit(
+        f"refs/heads/{BRANCH}",
+        author,
+        committer,
+        "Update stationary.db",
+        tree,
+        [repo.head.target] if repo.head_is_unborn else [repo.head.target]
+    )
+    
     remote = repo.remotes["origin"]
     credentials = pygit2.UserPass(GITHUB_TOKEN, "x-oauth-basic")
-    remote.push([f"refs/heads/{BRANCH}"], callbacks=pygit2.RemoteCallbacks(credentials=credentials))
+    try:
+        remote.push([f"refs/heads/{BRANCH}"], callbacks=pygit2.RemoteCallbacks(credentials=credentials))
+    except Exception as e:
+        st.error(f"Failed to push database to GitHub: {e}. Check your GitHub token permissions.")
 
-# Initialize
+# Sync database and update schema at startup
 sync_db_from_github()
 update_db_schema()
 
+# Connect to SQLite database
 conn = sqlite3.connect('stationary.db', check_same_thread=False)
 cur = conn.cursor()
 
-# ─────────────────────────────────────────────────────────────
-# Utility Functions
-# ─────────────────────────────────────────────────────────────
+# Function to hash password
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
 
-def hash_password(pw):
-    return hashlib.sha256(pw.encode()).hexdigest()
+# Function to add a new user
+def add_user(username, password):
+    password_hash = hash_password(password)
+    try:
+        cur.execute("INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 0)", (username, password_hash))
+        conn.commit()
+        sync_db_to_github()
+        return True
+    except sqlite3.IntegrityError:
+        return False
 
+# Function to verify user
 def verify_user(username, password):
-    cur.execute("SELECT * FROM users WHERE username = ? AND password_hash = ?",
-                (username, hash_password(password)))
+    password_hash = hash_password(password)
+    cur.execute("SELECT * FROM users WHERE username = ? AND password_hash = ?", (username, password_hash))
     return cur.fetchone() is not None
 
+# Function to check if user is admin
 def is_admin_user(username):
     cur.execute("SELECT is_admin FROM users WHERE username = ?", (username,))
-    r = cur.fetchone()
-    return r and r[0] == 1
+    result = cur.fetchone()
+    return result and result[0] == 1
 
+# Function to delete a user
+def delete_user(username):
+    try:
+        cur.execute("DELETE FROM users WHERE username = ?", (username,))
+        conn.commit()
+        sync_db_to_github()
+        return True
+    except sqlite3.Error as e:
+        st.error(f"Failed to delete user: {e}")
+        return False
+
+# Function to delete an item
+def delete_item(item_id):
+    try:
+        cur.execute("DELETE FROM items WHERE id = ?", (item_id,))
+        cur.execute("DELETE FROM transactions WHERE item_id = ?", (item_id,))
+        conn.commit()
+        sync_db_to_github()
+        return True
+    except sqlite3.Error as e:
+        st.error(f"Failed to delete item: {e}")
+        return False
+
+# Function to update an item
+def update_item(item_id, form_number, name, shelf, row, price, low_stock_threshold):
+    try:
+        cur.execute("""
+            UPDATE items 
+            SET form_number = ?, name = ?, shelf = ?, row = ?, price = ?, low_stock_threshold = ?
+            WHERE id = ?
+        """, (form_number, name, shelf, row, price, low_stock_threshold, item_id))
+        conn.commit()
+        sync_db_to_github()
+        return True
+    except sqlite3.IntegrityError as e:
+        st.error("Form number already exists. Please use a unique form number.")
+        return False
+    except sqlite3.Error as e:
+        st.error(f"Database error: {e}")
+        return False
+
+# Function to generate QR code for an item
 def generate_qr(item_id):
     qr = qrcode.QRCode(version=1, box_size=10, border=5)
     qr.add_data(str(item_id))
@@ -142,100 +237,153 @@ def generate_qr(item_id):
     img.save(buf, format="PNG")
     return buf.getvalue()
 
+# Function to add a new item and generate QR
 def add_item(form_number, name, shelf, row, price, initial_stock, low_stock_threshold):
     try:
         cur.execute(
-            "INSERT INTO items (form_number, name, shelf, row, price, stock, low_stock_threshold) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO items (form_number, name, shelf, row, price, stock, low_stock_threshold) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (form_number, name, shelf, row, price, initial_stock, low_stock_threshold)
         )
         conn.commit()
         sync_db_to_github()
         item_id = cur.lastrowid
-        return item_id, generate_qr(item_id)
+        qr_bytes = generate_qr(item_id)
+        return item_id, qr_bytes
     except sqlite3.IntegrityError:
-        st.error("Form number already exists. Please use a unique one.")
+        st.error("Item/Form number already exists. Please use a unique number.")
         return None, None
 
+# Function to update stock and log transaction
 def update_stock(item_id, quantity, user):
     trans_type = 'add' if quantity > 0 else 'remove'
     cur.execute("UPDATE items SET stock = stock + ? WHERE id = ?", (quantity, item_id))
     cur.execute(
-        "INSERT INTO transactions (item_id, trans_date, quantity, trans_type, user) "
-        "VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO transactions (item_id, trans_date, quantity, trans_type, user) VALUES (?, ?, ?, ?, ?)",
         (item_id, datetime.date.today(), abs(quantity), trans_type, user)
     )
     conn.commit()
     sync_db_to_github()
 
-def get_item_by_id(item_id):
+# Function to get monthly usage
+def get_monthly_usage(month, year):
     cur.execute("""
-        SELECT id, form_number, name, shelf, row, price, stock, low_stock_threshold 
-        FROM items WHERE id = ?
-    """, (item_id,))
-    return cur.fetchone()
+        SELECT SUM(quantity) FROM transactions 
+        WHERE trans_type = 'remove' 
+        AND strftime('%m', trans_date) = ? 
+        AND strftime('%Y', trans_date) = ?
+    """, (f"{month:02d}", str(year)))
+    usage = cur.fetchone()[0] or 0
+    return usage
 
-def search_items(term):
-    term = f"%{term}%"
-    cur.execute("""
-        SELECT id, form_number, name, shelf, row, price, stock, low_stock_threshold 
-        FROM items 
-        WHERE name LIKE ? OR form_number LIKE ?
-    """, (term, term))
+# Function to get current stock value
+def get_current_stock_value():
+    cur.execute("SELECT SUM(stock * price) FROM items")
+    value = cur.fetchone()[0] or 0
+    return value
+
+# Function to get low stock items
+def get_low_stock_items():
+    cur.execute("SELECT id, name, stock, low_stock_threshold FROM items WHERE stock < low_stock_threshold")
     return cur.fetchall()
 
-# ─────────────────────────────────────────────────────────────
-# Graphical Item Card Display
-# ─────────────────────────────────────────────────────────────
+# Function to search items by name or form_number
+def search_items(search_term):
+    search_term = f"%{search_term}%"
+    cur.execute("PRAGMA table_info(items)")
+    columns = [info[1] for info in cur.fetchall()]
+    if 'form_number' in columns:
+        query = "SELECT id, form_number, name, shelf, row, price, stock, low_stock_threshold FROM items WHERE name LIKE ? OR form_number LIKE ?"
+    else:
+        query = "SELECT id, NULL as form_number, name, shelf, row, price, stock, low_stock_threshold FROM items WHERE name LIKE ?"
+    cur.execute(query, (search_term, search_term) if 'form_number' in columns else (search_term,))
+    return cur.fetchall()
 
-def display_item_card(item, key_prefix=""):
-    item_id, form_number, name, shelf, row, price, stock, threshold = item
-    form_number = form_number or "N/A"
+# Function to get all items for report
+def get_all_items():
+    cur.execute("SELECT id, form_number, name, shelf, row, price, stock, low_stock_threshold FROM items")
+    return cur.fetchall()
 
-    with st.container(border=True):
-        col_qr, col_info = st.columns([1, 3])
+# Function to generate monthly usage report
+def generate_monthly_report(month, year, usage, value, low_stock_items):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    pdf.cell(200, 10, txt="Stationary Management Report", ln=1, align='C')
+    pdf.cell(200, 10, txt=f"Month: {month}/{year}", ln=1)
+    pdf.cell(200, 10, txt=f"Monthly Usage (Quantity Removed): {usage}", ln=1)
+    pdf.cell(200, 10, txt=f"Current Stock Value: ${value:.2f}", ln=1)
+    pdf.ln(10)
+    pdf.cell(200, 10, txt="Reorder Reminders (Low Stock Items):", ln=1)
+    if low_stock_items:
+        for item in low_stock_items:
+            pdf.cell(200, 10, txt=f"ID: {item[0]}, Name: {item[1]}, Stock: {item[2]} (Threshold: {item[3]})", ln=1)
+    else:
+        pdf.cell(200, 10, txt="No low stock items.", ln=1)
+    pdf.ln(10)
+    pdf.cell(200, 10, txt="Created by BOC Weerambugedara Team", ln=1, align='C')
+    
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+        pdf.output(tmp_file.name)
+        tmp_file.seek(0)
+        pdf_bytes = tmp_file.read()
+    os.unlink(tmp_file.name)
+    return pdf_bytes
 
-        with col_qr:
-            qr_data = generate_qr(item_id)
-            st.image(qr_data, use_container_width=True)
-            st.caption(f"ID: {item_id}")
+# Function to generate all items report
+def generate_all_items_report(items):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    pdf.cell(200, 10, txt="All Items Report", ln=1, align='C')
+    pdf.cell(200, 10, txt=f"Generated on: {datetime.date.today()}", ln=1)
+    pdf.ln(10)
+    pdf.cell(200, 10, txt="Items List:", ln=1)
+    if items:
+        for item in items:
+            form_number = item[1] if item[1] else "N/A"
+            pdf.cell(200, 10, txt=f"ID: {item[0]}, Form Number: {form_number}, Name: {item[2]}, Shelf: {item[3]}, Row: {item[4]}, Price: ${item[5]:.2f}, Stock: {item[6]}, Threshold: {item[7]}", ln=1)
+    else:
+        pdf.cell(200, 10, txt="No items found.", ln=1)
+    pdf.ln(10)
+    pdf.cell(200, 10, txt="Created by BOC Weerambugedara Team", ln=1, align='C')
+    
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+        pdf.output(tmp_file.name)
+        tmp_file.seek(0)
+        pdf_bytes = tmp_file.read()
+    os.unlink(tmp_file.name)
+    return pdf_bytes
 
-        with col_info:
-            st.subheader(name)
-            st.caption(f"Form Number: **{form_number}**")
+# Function to generate PDF with all QR codes
+def generate_qr_pdf():
+    pdf = FPDF()
+    pdf.set_font("Arial", size=12)
+    cur.execute("SELECT id, form_number, name FROM items")
+    items = cur.fetchall()
+    
+    for item in items:
+        item_id, form_number, name = item
+        form_number = form_number if form_number else "N/A"
+        pdf.add_page()
+        pdf.cell(200, 10, txt=f"Item ID: {item_id}, Form Number: {form_number}, Name: {name}", ln=1, align='C')
+        qr_bytes = generate_qr(item_id)
+        with open(f"temp_qr_{item_id}.png", "wb") as f:
+            f.write(qr_bytes)
+        pdf.image(f"temp_qr_{item_id}.png", x=50, y=30, w=100)
+        pdf.cell(200, 10, txt="Created by BOC Weerambugedara Team", ln=1, align='C')
+        os.remove(f"temp_qr_{item_id}.png")
+    
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+        pdf.output(tmp_file.name)
+        tmp_file.seek(0)
+        pdf_bytes = tmp_file.read()
+    os.unlink(tmp_file.name)
+    return pdf_bytes
 
-            st.markdown("---")
-
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Location", f"Shelf {shelf} • Row {row}")
-            c2.metric("Price", f"LKR {price:,.2f}")
-            c3.metric("Stock", stock, delta_color="normal")
-
-            if stock <= threshold:
-                st.error(f"⚠ Low stock! Only {stock} left (alert at {threshold})")
-            else:
-                st.success(f"Stock is healthy (alert at {threshold})")
-
-        # Action buttons
-        st.markdown("---")
-        btn1, btn2 = st.columns(2)
-        with btn1:
-            if st.button("➕ Add Stock", key=f"{key_prefix}add_{item_id}", use_container_width=True):
-                st.session_state["action_item_id"] = item_id
-                st.session_state["action_type"] = "add"
-                st.rerun()
-        with btn2:
-            if st.button("➖ Remove Stock", key=f"{key_prefix}remove_{item_id}", use_container_width=True):
-                st.session_state["action_item_id"] = item_id
-                st.session_state["action_type"] = "remove"
-                st.rerun()
-
-# ─────────────────────────────────────────────────────────────
-# Main App UI
-# ─────────────────────────────────────────────────────────────
-
+# Streamlit App Layout
 st.title("Stationary Management System")
 
+# Add branding to sidebar
 st.sidebar.markdown(
     """
     <div style="text-align: center; font-weight: bold; color: #4CAF50; margin-top: 20px;">
@@ -245,7 +393,7 @@ st.sidebar.markdown(
     unsafe_allow_html=True
 )
 
-# Login / Register
+# Session state for login
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.user = None
@@ -253,112 +401,269 @@ if 'logged_in' not in st.session_state:
 if not st.session_state.logged_in:
     st.header("Login / Register")
     tab1, tab2 = st.tabs(["Login", "Register"])
-
+    
     with tab1:
-        un = st.text_input("Username")
-        pw = st.text_input("Password", type="password")
+        username = st.text_input("Username", key="login_user")
+        password = st.text_input("Password", type="password", key="login_pass")
         if st.button("Login"):
-            if verify_user(un, pw):
+            if verify_user(username, password):
                 st.session_state.logged_in = True
-                st.session_state.user = un
+                st.session_state.user = username
                 st.rerun()
             else:
-                st.error("Invalid credentials")
-
+                st.error("Invalid username or password.")
+    
     with tab2:
-        new_un = st.text_input("New Username")
-        new_pw = st.text_input("New Password", type="password")
+        new_username = st.text_input("New Username", key="reg_user")
+        new_password = st.text_input("New Password", type="password", key="reg_pass")
         if st.button("Register"):
-            if add_user(new_un, new_pw):
-                st.success("Registered! Now login.")
+            if add_user(new_username, new_password):
+                st.success("User registered successfully! Please login.")
             else:
-                st.error("Username already taken")
+                st.error("Username already exists.")
 else:
-    st.sidebar.write(f"**Logged in as:** {st.session_state.user}")
+    st.sidebar.write(f"Logged in as: {st.session_state.user}")
     if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
         st.session_state.user = None
         st.rerun()
 
-    # Handle add/remove stock actions from card buttons
-    if "action_item_id" in st.session_state:
-        item_id = st.session_state["action_item_id"]
-        action = st.session_state["action_type"]
-
-        item = get_item_by_id(item_id)
-        if item:
-            _, form_number, name, _, _, price, stock, threshold = item
-            form_number = form_number or "N/A"
-
-            st.header(f"{'Add' if action == 'add' else 'Remove'} Stock – {name}")
-            st.write(f"Form Number: **{form_number}** | Current Stock: **{stock}**")
-
-            qty = st.number_input("Quantity", min_value=1, step=1)
-
-            if st.button(f"Confirm {'Add' if action == 'add' else 'Remove'}"):
-                change = qty if action == "add" else -qty
-                update_stock(item_id, change, st.session_state.user)
-                st.success(f"Stock updated successfully!")
-                del st.session_state["action_item_id"]
-                del st.session_state["action_type"]
-                st.rerun()
-
-            if st.button("Cancel"):
-                del st.session_state["action_item_id"]
-                del st.session_state["action_type"]
-                st.rerun()
-        else:
-            st.error("Item not found.")
-            del st.session_state["action_item_id"]
-            del st.session_state["action_type"]
-
-    # Main Menu
-    menu_options = ["Search Items", "Add New Item", "Generate Report", "Reorder Reminders", "QR Code List"]
+    # Menu options
+    menu_options = ["Search Items", "Add New Item", "Add Stock", "Remove Stock", "Generate Report", "Reorder Reminders", "QR Code List"]
     if is_admin_user(st.session_state.user):
         menu_options.append("Admin Panel")
     menu = st.sidebar.selectbox("Menu", menu_options)
 
-    # ────────────── Search Items ──────────────
     if menu == "Search Items":
-        st.header("Search Stationary Items")
-        term = st.text_input("Enter item name or form number")
-        if term:
-            results = search_items(term)
-            if results:
-                st.success(f"Found {len(results)} item(s)")
-                for item in results:
-                    display_item_card(item, key_prefix="search_")
+        st.header("Search Items")
+        search_term = st.text_input("Search by Name or Form Number")
+        if search_term:
+            items = search_items(search_term)
+            if items:
+                for item in items:
+                    item_id, form_number, name, shelf, row, price, stock, low_stock_threshold = item
+                    form_number = form_number if form_number else "N/A"
+                    st.write(f"ID: {item_id}, Form Number: {form_number}, Name: {name}, Shelf: {shelf}, Row: {row}, Price: ${price:.2f}, Stock: {stock}, Threshold: {low_stock_threshold}")
+                    st.markdown("---")
             else:
-                st.warning("No items found.")
+                st.info("No items found matching the search term.")
 
-    # ────────────── Add New Item ──────────────
     elif menu == "Add New Item":
-        st.header("Add New Stationary Item")
-        form_number = st.text_input("Form Number (unique)")
+        st.header("Add New Item")
+        form_number = st.text_input("Item/Form Number (must be unique)")
         name = st.text_input("Item Name")
-        shelf = st.number_input("Shelf", min_value=1, step=1)
-        row = st.number_input("Row", min_value=1, step=1)
-        price = st.number_input("Price per unit", min_value=0.0, step=0.01)
+        shelf = st.number_input("Shelf Number", min_value=1, step=1)
+        row = st.number_input("Row Number", min_value=1, step=1)
+        price = st.number_input("Price per Unit", min_value=0.0, step=0.01)
         initial_stock = st.number_input("Initial Stock", min_value=0, step=1)
-        threshold = st.number_input("Low Stock Threshold", min_value=1, step=1, value=10)
-
+        low_stock_threshold = st.number_input("Low Stock Threshold", min_value=1, step=1, value=10)
+        
         if st.button("Add Item"):
             if form_number and name:
-                item_id, qr_data = add_item(form_number, name, shelf, row, price, initial_stock, threshold)
+                item_id, qr_bytes = add_item(form_number, name, shelf, row, price, initial_stock, low_stock_threshold)
                 if item_id:
-                    st.success(f"Added successfully – ID: {item_id}")
-                    col_qr, col_info = st.columns([1, 3])
-                    with col_qr:
-                        st.image(qr_data, use_container_width=True)
-                    with col_info:
-                        st.write(f"**{name}**")
-                        st.caption(f"Form: {form_number} | Location: Shelf {shelf}, Row {row}")
-                        st.metric("Price", f"LKR {price:,.2f}")
-                        st.metric("Stock", initial_stock)
-                    st.download_button("Download QR", qr_data, f"qr_{item_id}_{form_number}.png", "image/png")
+                    st.success(f"Item added with ID: {item_id}")
+                    st.write(f"Form Number: {form_number}, Name: {name}, Shelf: {shelf}, Row: {row}, Price: ${price:.2f}, Stock: {initial_stock}, Threshold: {low_stock_threshold}")
+                    st.image(qr_bytes, caption=f"QR Code for Item ID {item_id}", use_container_width=True)
+                    st.download_button(
+                        label="Download QR Code",
+                        data=qr_bytes,
+                        file_name=f"qr_{item_id}_{form_number}_{name}.png",
+                        mime="image/png"
+                    )
             else:
-                st.error("Form number and name are required.")
+                st.error("Please enter both an item/form number and item name.")
 
-    # Other menu options remain the same...
-    # (Generate Report, Reorder Reminders, QR Code List, Admin Panel)
-    # ... add your existing code for these sections here ...
+    elif menu == "Add Stock" or menu == "Remove Stock":
+        action = "Add" if menu == "Add Stock" else "Remove"
+        st.header(f"{action} Stock")
+        st.write("Use your phone camera to scan the QR code.")
+        img_file = st.camera_input("Scan QR Code")
+        
+        if img_file:
+            img = Image.open(img_file)
+            decoded_objects = decode(img)
+            if decoded_objects:
+                item_id = int(decoded_objects[0].data.decode('utf-8'))
+                st.success(f"Scanned Item ID: {item_id}")
+                
+                cur.execute("SELECT form_number, name, stock FROM items WHERE id = ?", (item_id,))
+                item = cur.fetchone()
+                if item:
+                    form_number, name, stock = item
+                    form_number = form_number if form_number else "N/A"
+                    st.write(f"Form Number: {form_number}, Item: {name}, Current Stock: {stock}")
+                    quantity = st.number_input(f"Quantity to {action}", min_value=1, step=1)
+                    
+                    if st.button(f"Confirm {action}"):
+                        qty = quantity if action == "Add" else -quantity
+                        update_stock(item_id, qty, st.session_state.user)
+                        st.success(f"Stock updated successfully!")
+                else:
+                    st.error("Item not found.")
+            else:
+                st.error("No QR code detected. Try again.")
+
+    elif menu == "Generate Report":
+        st.header("Generate Report")
+        report_type = st.selectbox("Report Type", ["Monthly Usage Report", "All Items Report"])
+        
+        if report_type == "Monthly Usage Report":
+            month = st.number_input("Month (1-12)", min_value=1, max_value=12, step=1)
+            year = st.number_input("Year", min_value=2000, step=1, value=datetime.date.today().year)
+        
+            if st.button("Generate"):
+                usage = get_monthly_usage(month, year)
+                value = get_current_stock_value()
+                low_stock_items = get_low_stock_items()
+                st.write(f"Monthly Usage (Quantity Removed in {month}/{year}): {usage}")
+                st.write(f"Current Stock Value: ${value:.2f}")
+                
+                try:
+                    pdf_bytes = generate_monthly_report(month, year, usage, value, low_stock_items)
+                    st.download_button(
+                        label="Download Monthly Usage Report",
+                        data=pdf_bytes,
+                        file_name=f"monthly_report_{month}_{year}.pdf",
+                        mime="application/pdf"
+                    )
+                except Exception as e:
+                    st.error(f"Failed to generate monthly report: {e}")
+        else:
+            if st.button("Generate"):
+                try:
+                    items = get_all_items()
+                    pdf_bytes = generate_all_items_report(items)
+                    st.download_button(
+                        label="Download All Items Report",
+                        data=pdf_bytes,
+                        file_name=f"all_items_report_{datetime.date.today()}.pdf",
+                        mime="application/pdf"
+                    )
+                except Exception as e:
+                    st.error(f"Failed to generate all items report: {e}")
+
+    elif menu == "Reorder Reminders":
+        st.header("Reorder Reminders")
+        low_stock_items = get_low_stock_items()
+        if low_stock_items:
+            for item in low_stock_items:
+                st.warning(f"ID: {item[0]}, Name: {item[1]}, Stock: {item[2]} (Threshold: {item[3]}) - Reorder now!")
+        else:
+            st.success("No low stock items.")
+
+    elif menu == "QR Code List":
+        st.header("QR Code List")
+        cur.execute("SELECT id, form_number, name, shelf, row, stock FROM items")
+        items = cur.fetchall()
+        
+        if items:
+            st.write("List of all items with QR codes:")
+            for item in items:
+                item_id, form_number, name, shelf, row, stock = item
+                form_number = form_number if form_number else "N/A"
+                st.write(f"ID: {item_id}, Form Number: {form_number}, Name: {name}, Shelf: {shelf}, Row: {row}, Stock: {stock}")
+                qr_bytes = generate_qr(item_id)
+                st.image(qr_bytes, caption=f"QR Code for {name} (ID: {item_id})", width=200)
+                st.download_button(
+                    label=f"Download QR for {name}",
+                    data=qr_bytes,
+                    file_name=f"qr_{item_id}_{form_number}_{name}.png",
+                    mime="image/png"
+                )
+                st.markdown("---")
+            
+            if st.button("Download All QR Codes as PDF"):
+                try:
+                    pdf_bytes = generate_qr_pdf()
+                    st.download_button(
+                        label="Download QR Code PDF",
+                        data=pdf_bytes,
+                        file_name="all_qr_codes.pdf",
+                        mime="application/pdf"
+                    )
+                except Exception as e:
+                    st.error(f"Failed to generate QR code PDF: {e}")
+        else:
+            st.info("No items found in the database.")
+
+    elif menu == "Admin Panel":
+        st.header("Admin Panel")
+        if not is_admin_user(st.session_state.user):
+            st.error("Access denied. You are not an admin.")
+            st.stop()
+
+        tab1, tab2 = st.tabs(["Manage Users", "Manage Items"])
+
+        with tab1:
+            st.subheader("Manage Users")
+            cur.execute("SELECT username, is_admin FROM users")
+            users = cur.fetchall()
+            if users:
+                for user in users:
+                    username, is_admin = user
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.write(f"**{username}** - {'Admin' if is_admin else 'Regular User'}")
+                    with col2:
+                        if username != st.session_state.user:
+                            if st.button("Delete", key=f"del_user_{username}"):
+                                if delete_user(username):
+                                    st.success(f"User {username} deleted.")
+                                    st.rerun()
+                        else:
+                            st.write("*Current user*")
+                    st.markdown("---")
+            else:
+                st.info("No users found.")
+
+        with tab2:
+            st.subheader("Edit / Delete Items")
+            items = get_all_items()
+            if not items:
+                st.info("No items in database.")
+            else:
+                for item in items:
+                    item_id, form_number, name, shelf, row, price, stock, threshold = item
+                    form_number = form_number or "N/A"
+                    
+                    with st.expander(f"ID: {item_id} | {form_number} - {name} | Stock: {stock}"):
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            st.write(f"**Current Values:**")
+                            st.write(f"Form Number: `{form_number}` | Shelf: {shelf} | Row: {row}")
+                            st.write(f"Price: ${price:.2f} | Low Stock Threshold: {threshold}")
+                        
+                        with col2:
+                            if st.button("Delete Item", key=f"del_item_{item_id}"):
+                                if delete_item(item_id):
+                                    st.success(f"Item {name} (ID: {item_id}) deleted.")
+                                    st.rerun()
+
+                        st.markdown("**Edit Item**")
+                        with st.form(key=f"edit_form_{item_id}"):
+                            new_form = st.text_input("Form Number", value=form_number if form_number != "N/A" else "", key=f"form_{item_id}")
+                            new_name = st.text_input("Item Name", value=name, key=f"name_{item_id}")
+                            new_shelf = st.number_input("Shelf", min_value=1, value=shelf, key=f"shelf_{item_id}")
+                            new_row = st.number_input("Row", min_value=1, value=row, key=f"row_{item_id}")
+                            new_price = st.number_input("Price", min_value=0.0, step=0.01, value=float(price), key=f"price_{item_id}")
+                            new_threshold = st.number_input("Low Stock Threshold", min_value=1, value=threshold, key=f"thresh_{item_id}")
+                            
+                            if st.form_submit_button("Save Changes"):
+                                if new_form == "":
+                                    st.error("Form number cannot be empty.")
+                                elif update_item(item_id, new_form if new_form else None, new_name, new_shelf, new_row, new_price, new_threshold):
+                                    st.success(f"Item {name} updated successfully!")
+                                    st.rerun()
+                        
+                        # Show new QR code after edit
+                        st.markdown("**Updated QR Code**")
+                        st.image(generate_qr(item_id), caption=f"QR Code for Item ID {item_id}", width=200)
+                        st.download_button(
+                            "Download Updated QR",
+                            data=generate_qr(item_id),
+                            file_name=f"qr_{item_id}_{new_form or form_number}_{name}.png",
+                            mime="image/png",
+                            key=f"dl_qr_{item_id}"
+                        )
+                        st.markdown("---")
