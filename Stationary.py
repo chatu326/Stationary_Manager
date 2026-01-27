@@ -205,18 +205,6 @@ def get_low_stock_items():
     cur.execute("SELECT id, name, stock, low_stock_threshold FROM items WHERE stock < low_stock_threshold")
     return cur.fetchall()
 
-def get_monthly_usage_details(month, year):
-    cur.execute("""
-        SELECT t.item_id, i.name, SUM(t.quantity) as usage, i.price
-        FROM transactions t
-        JOIN items i ON t.item_id = i.id
-        WHERE t.trans_type = 'remove'
-        AND strftime('%m', t.trans_date) = ?
-        AND strftime('%Y', t.trans_date) = ?
-        GROUP BY t.item_id, i.name, i.price
-    """, (f"{month:02d}", str(year)))
-    return cur.fetchall()
-
 def get_current_stock_value():
     cur.execute("SELECT SUM(stock * price) FROM items")
     return cur.fetchone()[0] or 0
@@ -248,117 +236,6 @@ def update_item(item_id, form_number, name, shelf, row, price, low_stock_thresho
     except sqlite3.Error as e:
         st.error(f"Database error: {e}")
         return False
-
-# ─────────────────────────────────────────────────────────────
-# Graphical Reports (in-memory, fixed output)
-# ─────────────────────────────────────────────────────────────
-
-def generate_monthly_report(month, year, usage_details, total_value):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, "Monthly Usage Report", ln=1, align="C")
-    pdf.set_font("Arial", "", 12)
-    pdf.cell(0, 10, f"Month/Year: {month}/{year} | Generated: {datetime.date.today()}", ln=1, align="C")
-    pdf.ln(10)
-
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Summary", ln=1)
-    pdf.set_font("Arial", "", 12)
-    pdf.cell(0, 8, f"Total Quantity Removed: {sum(row[2] for row in usage_details)} units", ln=1)
-    pdf.cell(0, 8, f"Total Value of Items Used: LKR {total_value:,.2f}", ln=1)
-    pdf.ln(10)
-
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Usage Details", ln=1)
-    pdf.set_font("Arial", "", 11)
-
-    if not usage_details:
-        pdf.cell(0, 8, "No usage recorded this month.", ln=1)
-    else:
-        pdf.cell(20, 8, "ID", border=1)
-        pdf.cell(70, 8, "Name", border=1)
-        pdf.cell(30, 8, "Usage", border=1)
-        pdf.cell(30, 8, "Unit Price", border=1)
-        pdf.cell(40, 8, "Total Value", border=1)
-        pdf.ln()
-
-        for row in usage_details:
-            item_id, name, usage, price = row
-            total_item_value = usage * price
-            pdf.cell(20, 8, str(item_id), border=1)
-            pdf.cell(70, 8, name[:35] + "..." if len(name) > 35 else name, border=1)
-            pdf.cell(30, 8, str(usage), border=1)
-            pdf.cell(30, 8, f"LKR {price:,.2f}", border=1)
-            pdf.cell(40, 8, f"LKR {total_item_value:,.2f}", border=1)
-            pdf.ln()
-
-    pdf.ln(5)
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, f"Grand Total Value Used: LKR {total_value:,.2f}", ln=1)
-
-    pdf.ln(10)
-    pdf.set_font("Arial", "I", 10)
-    pdf.cell(0, 10, "Created by BOC Weerambugedara Team", ln=1, align="C")
-
-    pdf_content = pdf.output(dest='S').encode('latin-1')
-    return pdf_content
-
-def generate_all_items_report(items):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, "All Items Inventory Report", ln=1, align="C")
-    pdf.set_font("Arial", "", 12)
-    pdf.cell(0, 10, f"Generated: {datetime.date.today()} | Total Items: {len(items)}", ln=1, align="C")
-    pdf.ln(10)
-
-    if not items:
-        pdf.set_font("Arial", "I", 12)
-        pdf.cell(0, 10, "No items in the database yet.", ln=1, align="C")
-    else:
-        pdf.set_font("Arial", "B", 11)
-        pdf.cell(20, 8, "ID", border=1)
-        pdf.cell(40, 8, "Form No", border=1)
-        pdf.cell(60, 8, "Name", border=1)
-        pdf.cell(20, 8, "Shelf", border=1)
-        pdf.cell(20, 8, "Row", border=1)
-        pdf.cell(25, 8, "Price", border=1)
-        pdf.cell(25, 8, "Stock", border=1)
-        pdf.cell(30, 8, "Stock Value", border=1)
-        pdf.ln()
-
-        pdf.set_font("Arial", "", 10)
-        total_stock_value = 0
-
-        for item in items:
-            item_id = item[0]
-            form_number = item[1] or "N/A"
-            name = item[2][:35] + "..." if len(item[2]) > 35 else item[2]
-            shelf, row, price, stock, threshold = item[3], item[4], item[5], item[6], item[7]
-            stock_value = stock * price
-            total_stock_value += stock_value
-
-            pdf.cell(20, 8, str(item_id), border=1)
-            pdf.cell(40, 8, str(form_number), border=1)
-            pdf.cell(60, 8, name, border=1)
-            pdf.cell(20, 8, str(shelf), border=1)
-            pdf.cell(20, 8, str(row), border=1)
-            pdf.cell(25, 8, f"LKR {price:,.2f}", border=1)
-            pdf.cell(25, 8, str(stock), border=1)
-            pdf.cell(30, 8, f"LKR {stock_value:,.2f}", border=1)
-            pdf.ln()
-
-        pdf.ln(5)
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 10, f"Total Stock Value: LKR {total_stock_value:,.2f}", ln=1)
-
-    pdf.ln(10)
-    pdf.set_font("Arial", "I", 10)
-    pdf.cell(0, 10, "Created by BOC Weerambugedara Team", ln=1, align="C")
-
-    pdf_content = pdf.output(dest='S').encode('latin-1')
-    return pdf_content
 
 # ─────────────────────────────────────────────────────────────
 # Graphical Item Card Display
@@ -406,11 +283,19 @@ def display_item_card(item, key_prefix="", show_back_button=False):
                 st.rerun()
 
         if show_back_button:
-            if st.button("← Back to Search / Home", key=f"{key_prefix}back_{item_id}"):
-                for k in list(st.session_state.keys()):
-                    if k.startswith(("action_", "view_")):
-                        del st.session_state[k]
-                st.rerun()
+            col_back1, col_back2 = st.columns(2)
+            with col_back1:
+                if st.button("← New Search", key=f"{key_prefix}back_search_{item_id}"):
+                    for k in list(st.session_state.keys()):
+                        if k in ["view_item_id", "last_search_results"]:
+                            del st.session_state[k]
+                    st.rerun()
+            with col_back2:
+                if st.button("Back to Home", key=f"{key_prefix}back_home_{item_id}"):
+                    for k in list(st.session_state.keys()):
+                        if k.startswith(("action_", "view_", "last_search_results")):
+                            del st.session_state[k]
+                    st.rerun()
 
 # ─────────────────────────────────────────────────────────────
 # Main App UI
@@ -509,17 +394,26 @@ else:
     menu = st.sidebar.selectbox("Menu", menu_options)
 
     if menu == "Search Items":
+        # Results mode (after search or scan)
         if "view_item_id" in st.session_state:
-            # Show only the result card (no search bar)
             item = get_item_by_id(st.session_state["view_item_id"])
             if item:
-                if st.button("← New Search"):
+                if st.button("← Back to Search"):
                     st.session_state.pop("view_item_id", None)
                     st.rerun()
                 st.header("Search Result")
                 display_item_card(item, key_prefix="view_", show_back_button=True)
+        elif "last_search_results" in st.session_state:
+            # Multiple results mode
+            if st.button("← Back to Search"):
+                st.session_state.pop("last_search_results", None)
+                st.rerun()
+            st.header("Search Results")
+            for item in st.session_state["last_search_results"]:
+                display_item_card(item, key_prefix="search_")
+                st.markdown("---")
         else:
-            # Show search interface
+            # Input mode
             st.header("Search or Scan Stationary Item")
 
             col_text, col_scan = st.columns([3, 1])
@@ -530,8 +424,6 @@ else:
                 st.caption("Or scan QR")
 
             img_file = st.camera_input("Scan QR Code", key="qr_scan_camera")
-
-            found_item = None
 
             if img_file is not None:
                 img = Image.open(img_file)
@@ -554,20 +446,13 @@ else:
             elif search_term:
                 results = search_items(search_term)
                 if results:
-                    st.session_state["last_search_results"] = results
+                    if len(results) == 1:
+                        st.session_state["view_item_id"] = results[0][0]
+                    else:
+                        st.session_state["last_search_results"] = results
                     st.rerun()
                 else:
                     st.warning("No items found matching the search term.")
-
-            # Display search results if available
-            if "last_search_results" in st.session_state:
-                if st.button("← New Search"):
-                    st.session_state.pop("last_search_results", None)
-                    st.rerun()
-                st.header("Search Results")
-                for item in st.session_state["last_search_results"]:
-                    display_item_card(item, key_prefix="search_")
-                    st.markdown("---")
 
     elif menu == "Add New Item":
         st.header("Add New Stationary Item")
