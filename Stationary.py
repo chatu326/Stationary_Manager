@@ -205,17 +205,14 @@ def get_low_stock_items():
     cur.execute("SELECT id, name, stock, low_stock_threshold FROM items WHERE stock < low_stock_threshold")
     return cur.fetchall()
 
-def get_monthly_usage_details(month, year):
+def get_monthly_usage(month, year):
     cur.execute("""
-        SELECT t.item_id, i.name, SUM(t.quantity) as usage, i.price
-        FROM transactions t
-        JOIN items i ON t.item_id = i.id
-        WHERE t.trans_type = 'remove'
-        AND strftime('%m', t.trans_date) = ?
-        AND strftime('%Y', t.trans_date) = ?
-        GROUP BY t.item_id, i.name, i.price
+        SELECT SUM(quantity) FROM transactions 
+        WHERE trans_type = 'remove' 
+        AND strftime('%m', trans_date) = ? 
+        AND strftime('%Y', trans_date) = ?
     """, (f"{month:02d}", str(year)))
-    return cur.fetchall()
+    return cur.fetchone()[0] or 0
 
 def get_current_stock_value():
     cur.execute("SELECT SUM(stock * price) FROM items")
@@ -250,122 +247,10 @@ def update_item(item_id, form_number, name, shelf, row, price, low_stock_thresho
         return False
 
 # ─────────────────────────────────────────────────────────────
-# Improved Graphical Reports (fixed BytesIO error)
-# ─────────────────────────────────────────────────────────────
-
-def generate_monthly_report(month, year, usage_details, total_value):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, "Monthly Usage Report", ln=1, align="C")
-    pdf.set_font("Arial", "", 12)
-    pdf.cell(0, 10, f"Month/Year: {month}/{year} | Generated: {datetime.date.today()}", ln=1, align="C")
-    pdf.ln(10)
-
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Summary", ln=1)
-    pdf.set_font("Arial", "", 12)
-    pdf.cell(0, 8, f"Total Quantity Removed: {sum(row[2] for row in usage_details)} units", ln=1)
-    pdf.cell(0, 8, f"Total Value of Items Used: LKR {total_value:,.2f}", ln=1)
-    pdf.ln(10)
-
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Usage Details", ln=1)
-    pdf.set_font("Arial", "", 11)
-    
-    if not usage_details:
-        pdf.cell(0, 8, "No usage recorded this month.", ln=1)
-    else:
-        pdf.cell(20, 8, "ID", border=1)
-        pdf.cell(70, 8, "Name", border=1)
-        pdf.cell(30, 8, "Usage", border=1)
-        pdf.cell(30, 8, "Unit Price", border=1)
-        pdf.cell(40, 8, "Total Value", border=1)
-        pdf.ln()
-
-        for row in usage_details:
-            item_id, name, usage, price = row
-            total_item_value = usage * price
-            pdf.cell(20, 8, str(item_id), border=1)
-            pdf.cell(70, 8, name[:35] + "..." if len(name) > 35 else name, border=1)
-            pdf.cell(30, 8, str(usage), border=1)
-            pdf.cell(30, 8, f"LKR {price:,.2f}", border=1)
-            pdf.cell(40, 8, f"LKR {total_item_value:,.2f}", border=1)
-            pdf.ln()
-
-    pdf.ln(5)
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, f"Grand Total Value Used: LKR {total_value:,.2f}", ln=1)
-
-    pdf.ln(10)
-    pdf.set_font("Arial", "I", 10)
-    pdf.cell(0, 10, "Created by BOC Weerambugedara Team", ln=1, align="C")
-
-    # Correct in-memory output
-    pdf_content = pdf.output(dest='S').encode('latin-1')
-    return pdf_content
-
-def generate_all_items_report(items):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, "All Items Inventory Report", ln=1, align="C")
-    pdf.set_font("Arial", "", 12)
-    pdf.cell(0, 10, f"Generated: {datetime.date.today()} | Total Items: {len(items)}", ln=1, align="C")
-    pdf.ln(10)
-
-    if not items:
-        pdf.set_font("Arial", "I", 12)
-        pdf.cell(0, 10, "No items in the database yet.", ln=1, align="C")
-    else:
-        pdf.set_font("Arial", "B", 11)
-        pdf.cell(20, 8, "ID", border=1)
-        pdf.cell(40, 8, "Form No", border=1)
-        pdf.cell(60, 8, "Name", border=1)
-        pdf.cell(20, 8, "Shelf", border=1)
-        pdf.cell(20, 8, "Row", border=1)
-        pdf.cell(25, 8, "Price", border=1)
-        pdf.cell(25, 8, "Stock", border=1)
-        pdf.cell(30, 8, "Stock Value", border=1)
-        pdf.ln()
-
-        pdf.set_font("Arial", "", 10)
-        total_stock_value = 0
-
-        for item in items:
-            item_id = item[0]
-            form_number = item[1] or "N/A"
-            name = item[2][:35] + "..." if len(item[2]) > 35 else item[2]
-            shelf, row, price, stock, threshold = item[3], item[4], item[5], item[6], item[7]
-            stock_value = stock * price
-            total_stock_value += stock_value
-
-            pdf.cell(20, 8, str(item_id), border=1)
-            pdf.cell(40, 8, str(form_number), border=1)
-            pdf.cell(60, 8, name, border=1)
-            pdf.cell(20, 8, str(shelf), border=1)
-            pdf.cell(20, 8, str(row), border=1)
-            pdf.cell(25, 8, f"LKR {price:,.2f}", border=1)
-            pdf.cell(25, 8, str(stock), border=1)
-            pdf.cell(30, 8, f"LKR {stock_value:,.2f}", border=1)
-            pdf.ln()
-
-        pdf.ln(5)
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 10, f"Total Stock Value: LKR {total_stock_value:,.2f}", ln=1)
-
-    pdf.ln(10)
-    pdf.set_font("Arial", "I", 10)
-    pdf.cell(0, 10, "Created by BOC Weerambugedara Team", ln=1, align="C")
-
-    pdf_content = pdf.output(dest='S').encode('latin-1')
-    return pdf_content
-
-# ─────────────────────────────────────────────────────────────
 # Graphical Item Card Display
 # ─────────────────────────────────────────────────────────────
 
-def display_item_card(item, key_prefix=""):
+def display_item_card(item, key_prefix="", show_back_button=True):
     item_id, form_number, name, shelf, row, price, stock, threshold = item
     form_number = form_number or "N/A"
 
@@ -406,11 +291,12 @@ def display_item_card(item, key_prefix=""):
                 st.session_state["action_type"] = "remove"
                 st.rerun()
 
-        if st.button("Back to Search / Home", key=f"{key_prefix}back_{item_id}"):
-            for k in list(st.session_state.keys()):
-                if k.startswith(("action_", "view_")):
-                    del st.session_state[k]
-            st.rerun()
+        if show_back_button:
+            if st.button("← Back to Search / Home", key=f"{key_prefix}back_{item_id}"):
+                for k in list(st.session_state.keys()):
+                    if k.startswith(("action_", "view_")):
+                        del st.session_state[k]
+                st.rerun()
 
 # ─────────────────────────────────────────────────────────────
 # Main App UI
@@ -500,10 +386,7 @@ else:
         item = get_item_by_id(st.session_state["view_item_id"])
         if item:
             st.header("Updated Item Information")
-            display_item_card(item, key_prefix="updated_")
-        if st.button("Back to Search / Home"):
-            st.session_state.pop("view_item_id", None)
-            st.rerun()
+            display_item_card(item, key_prefix="updated_", show_back_button=True)
 
     # Menu
     menu_options = ["Search Items", "Add New Item", "Generate Report", "Reorder Reminders", "QR Code List"]
@@ -511,20 +394,25 @@ else:
         menu_options.append("Admin Panel")
     menu = st.sidebar.selectbox("Menu", menu_options)
 
+    # ────────────── Search Items (with QR Scan) ──────────────
     if menu == "Search Items":
-        st.header("Search or Scan Stationary Item")
+        # Show search inputs only if no result is being displayed
+        if "view_item_id" not in st.session_state:
+            st.header("Search or Scan Stationary Item")
 
-        col_text, col_scan = st.columns([3, 1])
-        with col_text:
-            search_term = st.text_input("Search by Name or Form Number", key="search_text")
-        with col_scan:
-            st.write("")  # spacing
-            st.caption("Or scan QR")
+            col_text, col_scan = st.columns([3, 1])
+            with col_text:
+                search_term = st.text_input("Search by Name or Form Number", key="search_text")
+            with col_scan:
+                st.write("")  # spacing
+                st.write("")  # spacing
+                st.caption("Or scan QR")
 
-        img_file = st.camera_input("Scan QR Code", key="qr_scan_camera")
+            img_file = st.camera_input("Scan QR Code", key="qr_scan_camera")
 
         found_item = None
 
+        # QR Scan handling
         if img_file is not None:
             img = Image.open(img_file)
             decoded_objects = decode(img)
@@ -534,6 +422,7 @@ else:
                     item = get_item_by_id(item_id)
                     if item:
                         found_item = item
+                        st.session_state["view_item_id"] = item_id
                         st.success(f"Scanned successfully – Item ID: {item_id}")
                     else:
                         st.error("No item found with this QR code.")
@@ -542,6 +431,7 @@ else:
             else:
                 st.error("No QR code detected. Try again.")
 
+        # Text search handling
         elif search_term:
             results = search_items(search_term)
             if results:
@@ -552,10 +442,12 @@ else:
             else:
                 st.warning("No items found matching the search term.")
 
+        # Show single item card if found (from scan or single match)
         if found_item:
             st.markdown("### Item Details")
             display_item_card(found_item, key_prefix="scan_")
 
+    # ────────────── Add New Item ──────────────
     elif menu == "Add New Item":
         st.header("Add New Stationary Item")
         form_number = st.text_input("Form Number (unique)")
@@ -583,6 +475,7 @@ else:
             else:
                 st.error("Form number and name required.")
 
+    # ────────────── Generate Report ──────────────
     elif menu == "Generate Report":
         st.header("Generate Report")
         report_type = st.selectbox("Report Type", ["Monthly Usage Report", "All Items Inventory Report"])
@@ -637,6 +530,7 @@ else:
                 except Exception as e:
                     st.error(f"All items report failed: {str(e)}")
 
+    # ────────────── Reorder Reminders ──────────────
     elif menu == "Reorder Reminders":
         st.header("Reorder Reminders")
         items = get_low_stock_items()
@@ -646,6 +540,7 @@ else:
         else:
             st.success("No items below threshold.")
 
+    # ────────────── QR Code List ──────────────
     elif menu == "QR Code List":
         st.header("All QR Codes")
         items = get_all_items()
@@ -666,6 +561,7 @@ else:
         else:
             st.info("No items yet.")
 
+    # ────────────── Admin Panel ──────────────
     elif menu == "Admin Panel":
         st.header("Admin Panel")
         if not is_admin_user(st.session_state.user):
