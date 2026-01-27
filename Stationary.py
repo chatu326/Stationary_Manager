@@ -109,7 +109,7 @@ conn = sqlite3.connect('stationary.db', check_same_thread=False)
 cur = conn.cursor()
 
 # ─────────────────────────────────────────────────────────────
-# Core Functions (unchanged)
+# Core Functions
 # ─────────────────────────────────────────────────────────────
 
 def hash_password(pw):
@@ -205,14 +205,17 @@ def get_low_stock_items():
     cur.execute("SELECT id, name, stock, low_stock_threshold FROM items WHERE stock < low_stock_threshold")
     return cur.fetchall()
 
-def get_monthly_usage(month, year):
+def get_monthly_usage_details(month, year):
     cur.execute("""
-        SELECT SUM(quantity) FROM transactions 
-        WHERE trans_type = 'remove' 
-        AND strftime('%m', trans_date) = ? 
-        AND strftime('%Y', trans_date) = ?
+        SELECT t.item_id, i.name, SUM(t.quantity) as usage, i.price
+        FROM transactions t
+        JOIN items i ON t.item_id = i.id
+        WHERE t.trans_type = 'remove'
+        AND strftime('%m', t.trans_date) = ?
+        AND strftime('%Y', t.trans_date) = ?
+        GROUP BY t.item_id, i.name, i.price
     """, (f"{month:02d}", str(year)))
-    return cur.fetchone()[0] or 0
+    return cur.fetchall()
 
 def get_current_stock_value():
     cur.execute("SELECT SUM(stock * price) FROM items")
@@ -247,10 +250,10 @@ def update_item(item_id, form_number, name, shelf, row, price, low_stock_thresho
         return False
 
 # ─────────────────────────────────────────────────────────────
-# Improved Graphical Reports (fixed BytesIO issue)
+# Improved Graphical Reports (fixed BytesIO error)
 # ─────────────────────────────────────────────────────────────
 
-def generate_monthly_report(month, year, usage, total_value, low_stock_items):
+def generate_monthly_report(month, year, usage_details, total_value):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", "B", 16)
@@ -262,39 +265,45 @@ def generate_monthly_report(month, year, usage, total_value, low_stock_items):
     pdf.set_font("Arial", "B", 12)
     pdf.cell(0, 10, "Summary", ln=1)
     pdf.set_font("Arial", "", 12)
-    pdf.cell(0, 8, f"Total Quantity Removed: {usage} units", ln=1)
+    pdf.cell(0, 8, f"Total Quantity Removed: {sum(row[2] for row in usage_details)} units", ln=1)
     pdf.cell(0, 8, f"Total Value of Items Used: LKR {total_value:,.2f}", ln=1)
     pdf.ln(10)
 
     pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Low Stock Items", ln=1)
+    pdf.cell(0, 10, "Usage Details", ln=1)
     pdf.set_font("Arial", "", 11)
-
-    if not low_stock_items:
-        pdf.cell(0, 8, "No items below threshold.", ln=1)
+    
+    if not usage_details:
+        pdf.cell(0, 8, "No usage recorded this month.", ln=1)
     else:
-        pdf.cell(30, 8, "ID", border=1)
-        pdf.cell(80, 8, "Name", border=1)
-        pdf.cell(30, 8, "Stock", border=1)
-        pdf.cell(40, 8, "Threshold", border=1)
+        pdf.cell(20, 8, "ID", border=1)
+        pdf.cell(70, 8, "Name", border=1)
+        pdf.cell(30, 8, "Usage", border=1)
+        pdf.cell(30, 8, "Unit Price", border=1)
+        pdf.cell(40, 8, "Total Value", border=1)
         pdf.ln()
 
-        for item in low_stock_items:
-            item_id, name, stock, thresh = item
-            pdf.cell(30, 8, str(item_id), border=1)
-            pdf.cell(80, 8, name[:30] + "..." if len(name) > 30 else name, border=1)
-            pdf.cell(30, 8, str(stock), border=1)
-            pdf.cell(40, 8, str(thresh), border=1)
+        for row in usage_details:
+            item_id, name, usage, price = row
+            total_item_value = usage * price
+            pdf.cell(20, 8, str(item_id), border=1)
+            pdf.cell(70, 8, name[:35] + "..." if len(name) > 35 else name, border=1)
+            pdf.cell(30, 8, str(usage), border=1)
+            pdf.cell(30, 8, f"LKR {price:,.2f}", border=1)
+            pdf.cell(40, 8, f"LKR {total_item_value:,.2f}", border=1)
             pdf.ln()
+
+    pdf.ln(5)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 10, f"Grand Total Value Used: LKR {total_value:,.2f}", ln=1)
 
     pdf.ln(10)
     pdf.set_font("Arial", "I", 10)
     pdf.cell(0, 10, "Created by BOC Weerambugedara Team", ln=1, align="C")
 
-    pdf_output = BytesIO()
-    pdf.output(pdf_output)  # writes to buffer
-    pdf_output.seek(0)
-    return pdf_output.getvalue()
+    # Correct in-memory output
+    pdf_content = pdf.output(dest='S').encode('latin-1')
+    return pdf_content
 
 def generate_all_items_report(items):
     pdf = FPDF()
@@ -349,10 +358,8 @@ def generate_all_items_report(items):
     pdf.set_font("Arial", "I", 10)
     pdf.cell(0, 10, "Created by BOC Weerambugedara Team", ln=1, align="C")
 
-    pdf_output = BytesIO()
-    pdf.output(pdf_output)
-    pdf_output.seek(0)
-    return pdf_output.getvalue()
+    pdf_content = pdf.output(dest='S').encode('latin-1')
+    return pdf_content
 
 # ─────────────────────────────────────────────────────────────
 # Graphical Item Card Display
@@ -586,20 +593,19 @@ else:
 
             if st.button("Generate Monthly Report"):
                 try:
-                    usage = get_monthly_usage(month, year)
-                    value = get_current_stock_value()
-                    low_stock_items = get_low_stock_items()
+                    usage_details = get_monthly_usage_details(month, year)
+                    total_value = sum(row[2] * row[3] for row in usage_details)
 
                     st.subheader("Monthly Summary")
-                    st.metric("Total Quantity Removed", f"{usage} units")
-                    st.metric("Total Value of Items Used", f"LKR {value:,.2f}")
+                    st.metric("Total Quantity Removed", f"{sum(row[2] for row in usage_details)} units")
+                    st.metric("Total Value of Items Used", f"LKR {total_value:,.2f}")
 
-                    pdf_bytes = generate_monthly_report(month, year, usage, value, low_stock_items)
+                    pdf_bytes = generate_monthly_report(month, year, usage_details, total_value)
                     if pdf_bytes:
                         st.download_button(
                             label="Download Monthly Report PDF",
                             data=pdf_bytes,
-                            file_name=f"monthly_report_{month}_{year}.pdf",
+                            file_name=f"monthly_usage_{month}_{year}.pdf",
                             mime="application/pdf"
                         )
                     else:
