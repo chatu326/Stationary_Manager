@@ -250,7 +250,7 @@ def update_item(item_id, form_number, name, shelf, row, price, low_stock_thresho
 # Graphical Item Card Display
 # ─────────────────────────────────────────────────────────────
 
-def display_item_card(item, key_prefix="", show_back_button=True):
+def display_item_card(item, key_prefix="", show_back_button=False):
     item_id, form_number, name, shelf, row, price, stock, threshold = item
     form_number = form_number or "N/A"
 
@@ -389,15 +389,20 @@ else:
             display_item_card(item, key_prefix="updated_", show_back_button=True)
 
     # Menu
-    menu_options = ["Search Items", "Add New Item", "Generate Report", "Reorder Reminders", "QR Code List"]
+    menu_options = ["Search Items", "Add New Item", "Generate Report", "Reorder Reminders"]
     if is_admin_user(st.session_state.user):
-        menu_options.append("Admin Panel")
+        menu_options += ["QR Code List", "Admin Panel"]
     menu = st.sidebar.selectbox("Menu", menu_options)
 
-    # ────────────── Search Items (with QR Scan) ──────────────
     if menu == "Search Items":
-        # Show search inputs only if no result is being displayed
-        if "view_item_id" not in st.session_state:
+        # If we have a view_item_id from previous action, show only the card
+        if "view_item_id" in st.session_state:
+            item = get_item_by_id(st.session_state["view_item_id"])
+            if item:
+                st.header("Item Details")
+                display_item_card(item, key_prefix="view_", show_back_button=True)
+        else:
+            # Normal search/scan mode
             st.header("Search or Scan Stationary Item")
 
             col_text, col_scan = st.columns([3, 1])
@@ -405,49 +410,41 @@ else:
                 search_term = st.text_input("Search by Name or Form Number", key="search_text")
             with col_scan:
                 st.write("")  # spacing
-                st.write("")  # spacing
                 st.caption("Or scan QR")
 
             img_file = st.camera_input("Scan QR Code", key="qr_scan_camera")
 
-        found_item = None
+            found_item = None
 
-        # QR Scan handling
-        if img_file is not None:
-            img = Image.open(img_file)
-            decoded_objects = decode(img)
-            if decoded_objects:
-                try:
-                    item_id = int(decoded_objects[0].data.decode('utf-8'))
-                    item = get_item_by_id(item_id)
-                    if item:
-                        found_item = item
-                        st.session_state["view_item_id"] = item_id
-                        st.success(f"Scanned successfully – Item ID: {item_id}")
-                    else:
-                        st.error("No item found with this QR code.")
-                except ValueError:
-                    st.error("Invalid QR code format.")
-            else:
-                st.error("No QR code detected. Try again.")
+            if img_file is not None:
+                img = Image.open(img_file)
+                decoded_objects = decode(img)
+                if decoded_objects:
+                    try:
+                        item_id = int(decoded_objects[0].data.decode('utf-8'))
+                        item = get_item_by_id(item_id)
+                        if item:
+                            found_item = item
+                            st.session_state["view_item_id"] = item_id
+                            st.success(f"Scanned successfully – Item ID: {item_id}")
+                            st.rerun()  # trigger card display
+                        else:
+                            st.error("No item found with this QR code.")
+                    except ValueError:
+                        st.error("Invalid QR code format.")
+                else:
+                    st.error("No QR code detected. Try again.")
 
-        # Text search handling
-        elif search_term:
-            results = search_items(search_term)
-            if results:
-                st.success(f"Found {len(results)} matching item(s)")
-                for item in results:
-                    display_item_card(item, key_prefix="search_")
-                    st.markdown("---")
-            else:
-                st.warning("No items found matching the search term.")
+            elif search_term:
+                results = search_items(search_term)
+                if results:
+                    st.success(f"Found {len(results)} matching item(s)")
+                    for item in results:
+                        display_item_card(item, key_prefix="search_")
+                        st.markdown("---")
+                else:
+                    st.warning("No items found matching the search term.")
 
-        # Show single item card if found (from scan or single match)
-        if found_item:
-            st.markdown("### Item Details")
-            display_item_card(found_item, key_prefix="scan_")
-
-    # ────────────── Add New Item ──────────────
     elif menu == "Add New Item":
         st.header("Add New Stationary Item")
         form_number = st.text_input("Form Number (unique)")
@@ -475,7 +472,6 @@ else:
             else:
                 st.error("Form number and name required.")
 
-    # ────────────── Generate Report ──────────────
     elif menu == "Generate Report":
         st.header("Generate Report")
         report_type = st.selectbox("Report Type", ["Monthly Usage Report", "All Items Inventory Report"])
@@ -530,7 +526,6 @@ else:
                 except Exception as e:
                     st.error(f"All items report failed: {str(e)}")
 
-    # ────────────── Reorder Reminders ──────────────
     elif menu == "Reorder Reminders":
         st.header("Reorder Reminders")
         items = get_low_stock_items()
@@ -540,7 +535,6 @@ else:
         else:
             st.success("No items below threshold.")
 
-    # ────────────── QR Code List ──────────────
     elif menu == "QR Code List":
         st.header("All QR Codes")
         items = get_all_items()
@@ -561,7 +555,6 @@ else:
         else:
             st.info("No items yet.")
 
-    # ────────────── Admin Panel ──────────────
     elif menu == "Admin Panel":
         st.header("Admin Panel")
         if not is_admin_user(st.session_state.user):
