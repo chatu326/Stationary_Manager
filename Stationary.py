@@ -190,7 +190,6 @@ def get_item_by_id(item_id):
 
 def search_items(term):
     term = f"%{term}%"
-    # Use DISTINCT to avoid duplicate items when term matches both name and form_number
     cur.execute("""
         SELECT DISTINCT id, form_number, name, shelf, row, price, stock, low_stock_threshold 
         FROM items 
@@ -615,3 +614,4 @@ else:
                     if st.button("Delete Item", key=f"del_i_{item_id}"):
                         delete_item(item_id)
                         st.rerun()
+
