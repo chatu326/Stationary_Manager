@@ -109,7 +109,7 @@ conn = sqlite3.connect('stationary.db', check_same_thread=False)
 cur = conn.cursor()
 
 # ─────────────────────────────────────────────────────────────
-# Core Functions
+# Core Functions (unchanged)
 # ─────────────────────────────────────────────────────────────
 
 def hash_password(pw):
@@ -247,7 +247,7 @@ def update_item(item_id, form_number, name, shelf, row, price, low_stock_thresho
         return False
 
 # ─────────────────────────────────────────────────────────────
-# Graphical Reports (in-memory)
+# Improved Graphical Reports (fixed BytesIO issue)
 # ─────────────────────────────────────────────────────────────
 
 def generate_monthly_report(month, year, usage, total_value, low_stock_items):
@@ -292,7 +292,7 @@ def generate_monthly_report(month, year, usage, total_value, low_stock_items):
     pdf.cell(0, 10, "Created by BOC Weerambugedara Team", ln=1, align="C")
 
     pdf_output = BytesIO()
-    pdf.output(pdf_output)
+    pdf.output(pdf_output)  # writes to buffer
     pdf_output.seek(0)
     return pdf_output.getvalue()
 
@@ -382,7 +382,7 @@ def display_item_card(item, key_prefix=""):
             c3.metric("Stock", stock)
 
             if stock <= threshold:
-                st.error(f"Low stock! Only {stock} left (threshold: {threshold})")
+                st.error(f"Low stock alert! Only {stock} left (threshold: {threshold})")
             else:
                 st.success(f"Stock OK (threshold: {threshold})")
 
@@ -488,12 +488,15 @@ else:
             for k in ["action_item_id", "action_type"]:
                 st.session_state.pop(k, None)
 
-    # Show updated item after stock change
+    # Show updated item card after stock change
     if "view_item_id" in st.session_state:
         item = get_item_by_id(st.session_state["view_item_id"])
         if item:
             st.header("Updated Item Information")
             display_item_card(item, key_prefix="updated_")
+        if st.button("Back to Search / Home"):
+            st.session_state.pop("view_item_id", None)
+            st.rerun()
 
     # Menu
     menu_options = ["Search Items", "Add New Item", "Generate Report", "Reorder Reminders", "QR Code List"]
@@ -600,7 +603,7 @@ else:
                             mime="application/pdf"
                         )
                     else:
-                        st.error("PDF generation failed (empty file).")
+                        st.error("PDF generation returned empty file.")
                 except Exception as e:
                     st.error(f"Monthly report failed: {str(e)}")
 
@@ -624,7 +627,7 @@ else:
                             mime="application/pdf"
                         )
                     else:
-                        st.error("PDF generation failed (empty file).")
+                        st.error("PDF generation returned empty file.")
                 except Exception as e:
                     st.error(f"All items report failed: {str(e)}")
 
